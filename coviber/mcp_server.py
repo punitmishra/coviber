@@ -67,15 +67,37 @@ def catch_me_up(limit: int = 10) -> str:
     return "\n".join(lines)
 
 
+def _load_graph(data_dir: str):
+    """Read workgraph.json defensively.
+
+    Returns a dict, or a string on error / not-yet-built states. The store's
+    save_graph writes atomically (L1/#7), but a torn file could still land
+    if the operator hand-edits it, or if a partial write from an older
+    coviber version predates the fix — so guard the read at the boundary.
+    """
+    import json
+    from pathlib import Path
+    gp = Path(data_dir) / "workgraph.json"
+    if not gp.exists():
+        return "No graph yet — run `coviber ingest`."
+    try:
+        return json.loads(gp.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        return f"Work graph is unreadable ({type(e).__name__}: {e}). Re-run `coviber ingest`."
+
+
 @mcp.tool()
 def who_is(name: str) -> str:
     """What the work graph knows about a person: platforms, projects, channels, activity."""
     import json
-    from pathlib import Path
-    gp = Path(_settings().data_dir) / "workgraph.json"
-    if not gp.exists():
-        return "No graph yet — run `coviber ingest`."
-    node = json.loads(gp.read_text()).get("people", {}).get(name)
+    g = _load_graph(_settings().data_dir)
+    if isinstance(g, str):
+        return g
+    # WorkGraph stores person keys lowercased (L4/#14); the pretty form lives
+    # in the `display_name` node field. Look up case-insensitively so callers
+    # can pass "Ada Byron" or "ada byron" or "ADA BYRON" and get the same node.
+    people = g.get("people", {})
+    node = people.get(name) or people.get((name or "").lower())
     return json.dumps(node, indent=2) if node else f"'{name}' not found in the work graph."
 
 
@@ -83,11 +105,10 @@ def who_is(name: str) -> str:
 def project_status(name: str) -> str:
     """What the work graph knows about a project: people, channels, related tickets."""
     import json
-    from pathlib import Path
-    gp = Path(_settings().data_dir) / "workgraph.json"
-    if not gp.exists():
-        return "No graph yet — run `coviber ingest`."
-    node = json.loads(gp.read_text()).get("projects", {}).get(name)
+    g = _load_graph(_settings().data_dir)
+    if isinstance(g, str):
+        return g
+    node = g.get("projects", {}).get(name)
     return json.dumps(node, indent=2) if node else f"Project '{name}' not found."
 
 
@@ -95,16 +116,25 @@ def project_status(name: str) -> str:
 def graph_summary() -> str:
     """High-level shape of your context: counts + top people + projects."""
     import json
-    from pathlib import Path
-    gp = Path(_settings().data_dir) / "workgraph.json"
-    if not gp.exists():
-        return "No graph yet — run `coviber ingest`."
-    g = json.loads(gp.read_text())
+    g = _load_graph(_settings().data_dir)
+    if isinstance(g, str):
+        return g
+    # Use .get() everywhere so an old, hand-edited, or partially-populated
+    # workgraph.json can't KeyError the summary — the fields are ~stable
+    # but not part of a documented contract (audit finding L7/#33).
+    people = g.get("people", {})
+    projects = g.get("projects", {})
+    channels = g.get("channels", {})
+    tickets = g.get("tickets", {})
     return json.dumps({
-        "people": len(g["people"]), "projects": len(g["projects"]),
-        "channels": len(g["channels"]), "tickets": len(g["tickets"]),
-        "projects_list": sorted(g["projects"]),
-        "top_people": sorted(g["people"], key=lambda p: -g["people"][p].get("interaction_count", 0))[:8],
+        "people": len(people),
+        "projects": len(projects),
+        "channels": len(channels),
+        "tickets": len(tickets),
+        "projects_list": sorted(projects),
+        "top_people": sorted(
+            people, key=lambda p: -people[p].get("interaction_count", 0),
+        )[:8],
     }, indent=2)
 
 
@@ -132,10 +162,22 @@ def voice_profile() -> str:
 def refresh(loader: str, path: str = "") -> str:
     """Ingest fresh context via a named loader — loader='jsonl' with a path, or any
     registered loader. Pass loader='demo' explicitly to load the synthetic demo corpus
-    (it mixes fictional records into your real store; use a scratch data dir)."""
+    (it mixes fictional records into your real store; use a scratch data dir).
+
+    Loader errors (unknown loader, missing file, permission denied) are caught
+    and returned as a readable string so the MCP client sees an actionable
+    message rather than a raw Python traceback."""
     s = _settings()  # inherit known_projects, skip rules, etc. from the shared config
     s.loader, s.loader_config = loader, ({"path": path} if path else {})
-    stats = ingest(s)
+    try:
+        stats = ingest(s)
+    except (KeyError, ValueError, FileNotFoundError, IsADirectoryError,
+            PermissionError, OSError) as e:
+        # KeyError => unknown loader name; the rest are file / config issues.
+        # ImportError still propagates: it means the caller asked for an
+        # optional-extra loader (webscrape/qdrant) without installing the
+        # extra, which is a setup problem the operator should see plainly.
+        return f"refresh failed ({type(e).__name__}: {e})"
     g = stats["graph"]
     return (f"Ingested via {loader}: {stats['new']} new / {stats['total']} total. "
             f"Graph: {g['people']} people, {g['projects']} projects, {g['tickets']} tickets.")
