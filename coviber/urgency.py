@@ -51,11 +51,25 @@ class Config:
     weights: dict = None              # per-signal weights (see DEFAULT_WEIGHTS)
 
     def __post_init__(self):
-        self.priority_senders = {s.lower() for s in (self.priority_senders or set())}
-        self.collaborators = {s.lower() for s in (self.collaborators or set())}
-        self.action_words = self.action_words or set(DEFAULT_ACTION_WORDS)
-        self.skip_senders = {s.lower() for s in (self.skip_senders or DEFAULT_SKIP_SENDERS)}
-        self.skip_subjects = {s.lower() for s in (self.skip_subjects or DEFAULT_SKIP_SUBJECTS)}
+        # `is None` guards so an explicit empty set/list from config is
+        # honored as an opt-out; only genuinely-unset fields fall back to
+        # defaults. Before this, `action_words=[]` in YAML was silently
+        # equivalent to omitting the key (audit finding L5/#18).
+        self.priority_senders = {s.lower() for s in (
+            self.priority_senders if self.priority_senders is not None else set()
+        )}
+        self.collaborators = {s.lower() for s in (
+            self.collaborators if self.collaborators is not None else set()
+        )}
+        self.action_words = (
+            self.action_words if self.action_words is not None else set(DEFAULT_ACTION_WORDS)
+        )
+        self.skip_senders = {s.lower() for s in (
+            self.skip_senders if self.skip_senders is not None else DEFAULT_SKIP_SENDERS
+        )}
+        self.skip_subjects = {s.lower() for s in (
+            self.skip_subjects if self.skip_subjects is not None else DEFAULT_SKIP_SUBJECTS
+        )}
         # Partial-dict merge: user-supplied weights override defaults key-by-key,
         # so a config that only tweaks {"unread": 0} keeps every other default.
         merged = dict(DEFAULT_WEIGHTS)
