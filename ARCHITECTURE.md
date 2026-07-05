@@ -19,7 +19,7 @@ source-independent.
 ## Modules (map 1:1 to the whitepaper)
 | File | Role | Paper §|
 |------|------|--------|
-| `record.py` | Canonical `Record`; content-hash `id` for natural dedup | 3.2 |
+| `record.py` | Canonical `Record`; content-hash `id` for natural dedup; `ts` normalized to ISO-8601 UTC | 3.2 |
 | `loaders/` | `Loader` interface + registry; `demo`/`jsonl`/`webscrape` built-ins | 3.3 |
 | `workgraph.py` | Incremental entity extraction + bidirectional links, O(1)/record | 3.4 |
 | `urgency.py` | Multi-signal urgency score + skip filter | 3.5 |
