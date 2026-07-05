@@ -47,12 +47,13 @@ loader-agnostic. Full detail in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 | module | role |
 |--------|------|
-| `coviber/record.py` | canonical `Record` (content-hash id → dedup) |
-| `coviber/loaders/` | `Loader` interface + registry; built-ins: `demo`, `jsonl`, `webscrape` |
+| `coviber/record.py` | canonical `Record` (content-hash id → dedup; ts normalized to ISO UTC) |
+| `coviber/loaders/` | `Loader` interface + registry; built-ins: `demo`, `jsonl`, `webscrape`, `mbox`, `imap`, `slackexport` |
 | `coviber/workgraph.py` | people·projects·channels·tickets graph (O(1)/record) |
-| `coviber/urgency.py` | multi-signal urgency score + skip filter |
+| `coviber/urgency.py` | multi-signal urgency score `U(r) ∈ [0,14]` + skip filter |
 | `coviber/persona.py` | inference-free statistical voice model |
-| `coviber/store.py` | dedup JSONL (atomic rewrite) + local embeddings/cosine search |
+| `coviber/store.py` | dedup JSONL (atomic rewrite, write-locked) + persisted embedding cache / cosine search |
+| `coviber/config.py` | shared YAML/JSON settings parsing (CLI + MCP server) |
 | `coviber/pipeline.py` | `ingest()` cycle |
 | `coviber/mcp_server.py` | MCP tools over stdio (7 tools) |
 | `coviber/cli.py` | `coviber demo/ingest/triage/query/graph/serve/loaders` |
@@ -61,7 +62,7 @@ loader-agnostic. Full detail in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ```bash
 pip install -e ".[all,dev]"        # core is dependency-free; extras: scrape, search, mcp
-python -m pytest                   # 15 tests, keep green (or: python tests/test_pipeline.py)
+python -m pytest                   # 59 tests, keep green (mcp-gated ones skip without the extra)
 ruff check .                       # lint — config in pyproject.toml, must stay clean
 python bench/run.py --scale 2000   # reproducible benchmark (real numbers only)
 coviber demo                       # end-to-end on synthetic data
@@ -93,13 +94,15 @@ stay green; they are the required checks for merging to `main`.
 - Python floor is **3.9** (`requires-python`); no 3.10+ syntax or
   stdlib-API-without-shim outside the `[mcp]`-gated module.
 
-## Status (2026-07 — v0.1)
+## Status (2026-07 — v0.1.x, post merge train #1–#7)
 
-Built & verified: Record + 3 loaders (demo/jsonl/webscrape), WorkGraph, urgency
-triage, persona engine, store (atomic dedup + local embeddings), pipeline, CLI,
-MCP server (7 tools), 15 tests green, reproducible bench, CI, Apache-2.0 +
-NOTICE + CITATION + DATASHEET + ARCHITECTURE + CONTRIBUTING + SECURITY + issue
-templates + PR template.
+Built & verified: Record (ISO-UTC ts) + 6 loaders (demo/jsonl/webscrape/mbox/
+imap/slackexport), WorkGraph, urgency triage ([0,14], test-pinned), persona
+engine, store (atomic dedup + advisory write lock + persisted embedding cache),
+pipeline, CLI, MCP server (7 tools, `COVIBER_CONFIG` parity with the CLI),
+59 tests green, reproducible bench that reports the backend that actually ran,
+CI, Apache-2.0 + NOTICE + CITATION + DATASHEET + ARCHITECTURE + CONTRIBUTING +
+SECURITY + issue templates + PR template.
 
 ## What's next → see [ROADMAP.md](ROADMAP.md)
 

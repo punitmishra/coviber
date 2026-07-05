@@ -165,19 +165,19 @@ coviber ingest --config examples/scrape_config.example.yaml
 from coviber import Record, register
 from coviber.loaders.base import Loader
 
-@register("imap")
-class ImapLoader(Loader):
+@register("mycrm")
+class MyCrmLoader(Loader):
     def load(self):
-        for msg in fetch_imap(self.config):        # your source
-            yield Record(source="email", from_name=msg.sender,
-                         subject=msg.subject, text=msg.body, unread=msg.unread)
+        for note in fetch_crm(self.config):        # your source
+            yield Record(source="crm", from_name=note.author,
+                         subject=note.title, text=note.body, unread=note.unread)
 ```
 
-Register it in your package's entry points and `coviber ingest --loader imap` just works:
+Register it in your package's entry points and `coviber ingest --loader mycrm` just works:
 
 ```toml
 [project.entry-points."coviber.loaders"]
-imap = "my_pkg.imap:ImapLoader"
+mycrm = "my_pkg.crm:MyCrmLoader"
 ```
 
 ## How it works (the four pieces, from the paper)
