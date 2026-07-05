@@ -69,6 +69,7 @@ def cmd_query(args):
     for scoreval, r in hits:
         print(f"[{scoreval:.3f}] {r.from_name} · {r.source}/{r.channel}")
         print(f"        {r.subject or r.text[:80]}")
+    print(f"backend: {store.last_search_backend}")
 
 
 def cmd_graph(args):

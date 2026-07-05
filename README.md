@@ -173,9 +173,11 @@ imap = "my_pkg.imap:ImapLoader"
 | urgency triage (full scan) | 7 ms | 298,000 rec/s |
 | semantic search (top-8) | ~900 ms* | — |
 
-\* the zero-dependency store re-encodes records per query (upper bound); a
-persisted embedding index removes this. Numbers scale with `--scale` and
-hardware — reproduce them yourself, no unverifiable claims. See [DATASHEET](DATASHEET.md).
+\* measured before the persisted index landed, when the store re-encoded every
+record per query — treat it as the cold-start upper bound. Vectors now persist
+in `embeddings.json` and only new records are encoded, so warm queries skip
+record encoding entirely; we haven't published a warm number — run the bench
+yourself. Numbers scale with `--scale` and hardware. See [DATASHEET](DATASHEET.md).
 
 ## Design principles
 - **Local-first** — records, graph, and vectors stay on disk. No data leaves your machine.

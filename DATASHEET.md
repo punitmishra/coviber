@@ -30,9 +30,9 @@ None. Records are used as-is.
 - **Intended:** demos, tests, reproducible micro-benchmarks, tutorials.
 - **Not intended:** as a representative sample of real communication volume,
   distribution, or language. Absolute benchmark latencies scale with `--scale`
-  and hardware; semantic search re-encodes records per call (no persisted index
-  in the zero-dependency store), so search latency is an upper bound — a
-  production deployment caches embeddings.
+  and hardware; semantic search persists vectors in `embeddings.json` and
+  encodes only new records per query, so the first (cold) query is the upper
+  bound and warm queries skip record encoding.
 
 ## Distribution & maintenance
 Ships in-repo under Apache-2.0. Any resemblance to real organizations or people

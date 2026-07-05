@@ -57,15 +57,11 @@ def main():
         loaded = store.all()
         t_triage = _time(lambda: triage(loaded, cfg), repeat=5)
 
-        # store.search never raises (it falls back to keyword scoring internally),
-        # so probe the embedder directly to report the backend honestly
-        try:
-            from coviber.store import _get_embedder
-            _get_embedder()
-            search_mode = "embeddings (all-MiniLM-L6-v2)"
-        except Exception:
-            search_mode = "keyword fallback — install the [search] extra for embeddings"
+        # first repeat warms the persisted embedding cache; median ≈ warm-query latency
         t_search = _time(lambda: store.search("orbit embedding router gpu"), repeat=3)
+        search_mode = store.last_search_backend  # the backend that actually ran
+        if search_mode == "keyword":
+            search_mode = "keyword fallback — install the [search] extra for embeddings"
 
     print(f"\nCoViber benchmark — {n} synthetic records (median of repeats)\n")
     print(f"{'stage':<28}{'latency':>12}{'throughput':>18}")
