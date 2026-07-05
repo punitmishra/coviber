@@ -1,0 +1,221 @@
+% Verified: False
+% Refutation notes:
+%   The draft misstates the warning category emitted on duplicate-name loader registration. Under "Registry", the draft claims: "if the same name is registered twice by different classes, the registry retains the newer binding and issues a `RuntimeWarning` identifying the shadowing module and class; silent override is disallowed." Verifying against `/Users/I869061/code/active/coviber-oss/coviber/loaders/__init__.py` lines 18-21, the `register(name)` decorator's re-registration path invokes `warnings.warn(f"coviber loader '{name}' re-registered by ...", stacklevel=2)` with no `category=` argument, so the default `UserWarning` is emitted — not `RuntimeWarning`. This contradicts the code. (Note: the neighbouring claim about the *entry-point* failure warning being a `RuntimeWarning` is correct — line 70 explicitly passes `RuntimeWarning` — so only the duplicate-registration claim needs to be corrected, e.g. to `UserWarning` or the generic term "warning".) All other technical claims verified against code: 13-field Record ✓, id hash formula `MD5(text || \x1f || subject || \x1f || from_name || \x1f || source)` with `usedforsecurity=False` ✓ (record.py L50-54, L81), timestamp normalizer three-parser order with epoch sanity range [631152000, 4102444800] ✓ (record.py L30-42), naive→UTC and aware→astimezone(UTC) ✓ (L45-47), non-string coercion via `str()` ✓ (L27), `from_dict` unknown-key tolerance with per-key one-shot `RuntimeWarning` ✓ (L102-120), six built-in loaders demo/jsonl/mbox/imap/slackexport/webscrape ✓ (loaders/__init__.py L75), imap `BODY.PEEK` + read-only + timeout + `password_env` + plaintext-password rejection ✓ (imap.py L30-77), mbox+imap positive-limit rejection ✓, slack export users.json + `<@Uxxx>` mention resolution + replied-from-thread-membership ✓ (slackexport.py L27,L80-95), webscrape `record_selector` + `fields{selector, attr}` + `bs4` behind `[scrape]` extra ✓ (webscrape.py L56-58). One additional minor imprecision worth flagging (not a refutation on its own but tied to the fix): the draft's tuple/table uses the mathematical short names `from` and `thread`, while the actual dataclass fields are `from_name` and `thread_id` (record.py L68, L74). The draft frames these as a formal schema so the abbreviation is defensible, but an assembler note would help readers cross-referencing the code.
+% Notes to assembler: Prompt vs. code alignment notes:\n\n1. The prompt says 'EXCLUDE channel and ts from the id'. The code excludes considerably more than that: only (text, subject, from_name, source) participate in the hash (see record.py line 81). I stated the full exclusion list (channel, ts, unread, replied, recipie
+
+\subsection{Record schema}
+\label{sec:record}
+
+Every source of context---email, chat, code review, issue tracker, or arbitrary
+web page---is projected into a single canonical structure, the
+\emph{Record}. Downstream stages (deduplication, graph, urgency, search,
+persona) read Records and only Records; source-specific parsing lives strictly
+upstream of this boundary (\S\ref{sec:loader}). Formally, a Record is a tuple
+\[
+r \;=\; (\mathit{source},\, \mathit{text},\, \mathit{subject},\, \mathit{from},\, \mathit{recipient},\, \mathit{channel},\, \mathit{url},\, \mathit{ts},\, \mathit{unread},\, \mathit{thread},\, \mathit{replied},\, \mathit{scraped\_at},\, \mathit{id})
+\]
+over the domains summarised in Table~\ref{tab:record}. Only $\mathit{source}$
+is required in practice; all other fields default and are populated
+opportunistically by whichever loader produced the record.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+Field & Type & Role \\
+\midrule
+$\mathit{source}$      & string  & loader identifier, e.g.\ \texttt{email}, \texttt{slack}, \texttt{github} \\
+$\mathit{text}$        & string  & body / message content \\
+$\mathit{subject}$     & string  & title / subject line \\
+$\mathit{from}$        & string  & sender display name \\
+$\mathit{recipient}$   & string  & primary addressee (typically \texttt{"you"}) \\
+$\mathit{channel}$     & string  & sub-view (\texttt{dm}, \texttt{inbox}, \texttt{\#general}, \dots) \\
+$\mathit{url}$         & string  & deep link, if the source exposes one \\
+$\mathit{ts}$          & string  & event timestamp, ISO-8601 UTC (see below) \\
+$\mathit{unread}$      & bool    & has the user viewed this item \\
+$\mathit{thread}$      & string  & thread identifier, for reply detection \\
+$\mathit{replied}$     & bool    & has the user replied in this thread \\
+$\mathit{scraped\_at}$ & string  & wall-clock of ingest \\
+$\mathit{id}$          & string  & content-derived deduplication key \\
+\bottomrule
+\end{tabular}
+\caption{The thirteen fields of a canonical Record.}
+\label{tab:record}
+\end{table}
+
+\paragraph{Identity by content.}
+The record identifier is derived deterministically from a fixed prefix of the
+tuple. Let $\mathrm{H}$ be MD5 and let $\us$ denote the ASCII unit separator
+\texttt{\textbackslash x1f}. Then
+\begin{equation}
+\mathit{id}(r) \;=\; \mathrm{H}\bigl(\, \mathit{text}(r) \,\Vert\, \us \,\Vert\, \mathit{subject}(r) \,\Vert\, \us \,\Vert\, \mathit{from}(r) \,\Vert\, \us \,\Vert\, \mathit{source}(r) \,\bigr).
+\label{eq:id}
+\end{equation}
+Unset fields participate as the empty string. Two properties of
+Eq.~(\ref{eq:id}) matter downstream.
+\emph{(i)} The $\us$ delimiter guarantees an unambiguous field boundary:
+$(\text{``ab''},\text{``c''})$ and $(\text{``a''},\text{``bc''})$ hash to
+different ids, closing the class of concatenation collisions that a naive
+join would admit.
+\emph{(ii)} MD5 is invoked with \texttt{usedforsecurity=False}: the digest is
+used only as a dedup key, never as a cryptographic commitment, and the flag
+lets the same code run under FIPS-mode Python. Any collision-resistant hash
+would work; MD5 was retained for its narrow (32-hex-char) representation and
+zero-dependency availability.
+
+\paragraph{Dedup invariant.}
+By construction, Eq.~(\ref{eq:id}) yields the
+\emph{Record dedup invariant}: two records $r_1, r_2$ with identical
+$(\mathit{text}, \mathit{subject}, \mathit{from}, \mathit{source})$ satisfy
+$\mathit{id}(r_1) = \mathit{id}(r_2)$. The store keys on $\mathit{id}$
+(\S\ref{sec:store}), so re-scraping the same source repeatedly is idempotent:
+the corpus converges rather than growing linearly in scrape count. This is the
+single property that makes ``re-run the loaders whenever'' a viable
+operational mode.
+
+\paragraph{Fields deliberately excluded from the id.}
+The hash covers content and origin only; it omits $\mathit{channel}$,
+$\mathit{ts}$, $\mathit{unread}$, $\mathit{replied}$, $\mathit{recipient}$,
+$\mathit{url}$, $\mathit{thread}$, and $\mathit{scraped\_at}$. Two exclusions
+are load-bearing and documented as
+architectural invariants~\cite{TODO-coviber-architecture-md}:
+\begin{itemize}
+  \item \textbf{$\mathit{channel}$ excluded.} The same message surfaced through
+    two views (e.g.\ a Slack DM cross-posted to a channel, or an email visible
+    in both \texttt{inbox} and a label) collapses to one record. Escaping
+    this collapse when it is unwanted is a per-loader concern, addressed by
+    varying $\mathit{source}$ (issue tracker~\cite{TODO-coviber-issue-17}).
+  \item \textbf{$\mathit{ts}$ and mutable state excluded.} A CI bot that emits
+    an identical ``build passed'' line daily produces a single record whose
+    $\mathit{ts}$ advances on re-scrape; likewise $\mathit{replied}$ and
+    $\mathit{unread}$ can flip without minting a new id. The tradeoff is that
+    genuinely-recurring identical events are undercounted; the benefit is
+    that mutable state converges to its latest observation rather than
+    forking into a new record on every state transition.
+\end{itemize}
+
+\paragraph{Timestamp normalisation.}
+$\mathit{ts}$ is normalised in \texttt{Record.\_\_post\_init\_\_} so that
+lexicographic ordering of the stored string equals chronological ordering.
+The normalisation function attempts three parsers in order:
+\emph{(1)} ISO-8601 (with a \texttt{Z}$\rightarrow$\texttt{+00:00} shim, since
+Python~3.9's \texttt{datetime.fromisoformat} does not accept the military
+suffix); \emph{(2)} RFC-2822 (the format email \texttt{Date:} headers use),
+via \texttt{email.utils.parsedate\_to\_datetime}; \emph{(3)} POSIX epoch
+seconds, gated to the sanity range $[631152000, 4102444800]$ (1990-01-01 to
+2100-01-01) so that small integers are not misinterpreted as timestamps.
+Naive datetimes are assumed UTC; aware datetimes are converted via
+\texttt{astimezone(UTC)} so mixed-offset inputs still order correctly.
+Non-string inputs (int/float epoch, bool, \texttt{None}) are coerced through
+\texttt{str()} before parsing---a defensive choice motivated by JSONL inputs
+where the surface syntax admits any of these. Unparseable strings pass through
+unchanged; the loss is confined to that record's ordering, not the store's
+readability.
+
+\paragraph{Forward-compatible deserialisation.}
+\texttt{Record.from\_dict} tolerates unknown keys: an older CoViber reading a
+\texttt{records.jsonl} written by a newer version silently drops fields it
+cannot represent, rather than crashing. The first observation of each unknown
+key raises a per-process \texttt{RuntimeWarning}, so an operator running a
+downgraded binary is told which fields will be lost on the next rewrite. Warn
+frequency is capped at once per key to prevent a large store from drowning
+real signals in duplicate warnings.
+
+\subsection{Loader interface}
+\label{sec:loader}
+
+The Loader is the \emph{only} extension seam in CoViber: everything downstream
+of the Record boundary---dedup, graph, urgency, persona, MCP---is
+source-independent by construction. Adding a data source therefore reduces to
+implementing a single method.
+
+\paragraph{Contract.}
+A Loader is a Python class satisfying
+\begin{equation*}
+\texttt{Loader.load()} \;:\; \varnothing \;\longrightarrow\; \mathrm{Iterable}[\mathrm{Record}].
+\end{equation*}
+The default constructor accepts a \texttt{dict} of configuration (the block
+under \texttt{config:} in the YAML file, or a keyword equivalent). Loaders are
+expected to validate required configuration eagerly in \texttt{\_\_init\_\_}
+and to stream records lazily from \texttt{load()}, so that a large corpus
+(a full mbox, an IMAP inbox, a long JSONL file) can be ingested without
+holding it in memory. The base class provides no default implementation of
+\texttt{load()}; the class attribute \texttt{name} is populated by the
+registry decorator (below), giving a loader a stable identifier that YAML
+config and the CLI can reference.
+
+\paragraph{Registry.}
+Loaders resolve by name through a process-global registry. The
+\texttt{@register("myapp")} decorator inserts a class into the registry under
+that name and sets its \texttt{name} attribute. Third-party packages may
+alternatively expose loaders via the standard Python \texttt{coviber.loaders}
+entry-point group, which is loaded lazily the first time the registry is
+queried. Resolution proceeds as follows:
+
+\begin{algorithm}[h]
+\caption{\textsc{get\_loader}$(n, c)$ --- resolve a Loader by name}
+\label{alg:get_loader}
+\begin{algorithmic}[1]
+\Require name $n$, config dict $c$
+\State \Call{load\_entrypoints}{} \Comment{once per process; discovers third-party loaders}
+\If{$n \notin \mathrm{REGISTRY}$}
+  \State \textbf{raise} $\mathrm{KeyError}(n, \mathrm{available}=\mathrm{sorted}(\mathrm{REGISTRY}))$
+\EndIf
+\State \Return $\mathrm{REGISTRY}[n](c)$
+\end{algorithmic}
+\end{algorithm}
+
+Two properties matter. First, if the same name is registered twice by
+different classes, the registry retains the newer binding and issues a
+\texttt{RuntimeWarning} identifying the shadowing module and class; silent
+override is disallowed. Second, entry-point loading is \emph{fail-open}: a
+broken third-party plugin (import error, missing extra) does not disable the
+whole registry, but does emit a \texttt{RuntimeWarning} naming the entry point
+and the underlying exception. Silent failure would be catastrophic for an
+extension seam whose value proposition is ``write your own loader in ${\sim}10$
+lines''; the operator must be able to see \emph{why} a plugin did not
+register.
+
+\paragraph{Built-in loaders.}
+Six loaders ship in the reference implementation
+(Table~\ref{tab:builtin-loaders}); each is under $\sim\!100$ lines of
+pure-standard-library Python, with the sole exception of
+\texttt{webscrape} which imports \texttt{beautifulsoup4} behind the
+\texttt{[scrape]} extra.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}lp{0.72\linewidth}@{}}
+\toprule
+Name & Description \\
+\midrule
+\texttt{demo}        & Fixed synthetic cross-platform stream for a fictional company; zero configuration. Powers the reproducible evaluation of \S\ref{sec:eval}. \\
+\texttt{jsonl}       & Universal escape hatch: one JSON object per line, keys are a subset of the Record fields. Any data one can dump to disk can enter CoViber through this loader. \\
+\texttt{mbox}        & Local Unix \texttt{mbox} file via \texttt{mailbox} (stdlib). Newest-first, with a positive-integer \texttt{limit} for the newest $N$ messages. Ships a stdlib HTML$\rightarrow$text fallback for HTML-only messages. \\
+\texttt{imap}        & IMAP4-over-SSL fetch. Password is referenced by environment-variable \emph{name} (\texttt{password\_env}); plaintext passwords in config are rejected. Mailbox is opened read-only; \texttt{BODY.PEEK} avoids marking mail as seen. A configurable network timeout bounds every syscall. \\
+\texttt{slackexport} & A standard Slack workspace export (unzipped directory of \texttt{users.json} plus per-channel day files). Resolves \texttt{<@Uxxx>} mentions to display names; derives \texttt{replied} from thread membership. \\
+\texttt{webscrape}   & Config-driven DOM extraction: a \texttt{record\_selector} plus a map of field$\rightarrow$(CSS selector, attribute) turns any list-style web page into Records with zero per-site code. \\
+\bottomrule
+\end{tabular}
+\caption{Built-in loaders. Every non-trivial parsing seam CoViber needs is one of these six; a seventh is a two-file plugin.}
+\label{tab:builtin-loaders}
+\end{table}
+
+Two structural choices deserve emphasis. The \texttt{jsonl} loader is
+sufficient by itself to onboard any source that can be serialised to disk;
+this is the ``no plugin required'' path for exotic corpora. The
+\texttt{webscrape} loader---where the site's DOM shape lives in YAML rather
+than Python---is the ``no plugin required'' path for browser-visible content.
+Together they cover the long tail without expanding the registry.
+
+\paragraph{Consequence for the rest of the system.}
+Because the Loader is the sole seam and every Loader emits Records satisfying
+Eq.~(\ref{eq:id}), the deduplication invariant, the WorkGraph
+(\S\ref{sec:workgraph}), the urgency scoring function
+(\S\ref{sec:urgency}), the persona model (\S\ref{sec:persona}), and the
+MCP surface (\S\ref{sec:mcp}) each admit a single implementation valid
+across all present and future sources. This is the load-bearing simplification
+behind CoViber's small line count: the source-heterogeneity problem is
+contained entirely in \S\ref{sec:loader}.

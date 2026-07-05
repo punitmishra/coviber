@@ -1,0 +1,181 @@
+% Verified: False
+% Refutation notes:
+%   Two concrete misstatements against the shipped code, both grounds for refutation under the "default/constant misstated" rule:
+%   
+%   (1) URGENCY SIGNAL COUNT (§1.2, "Why inference-free where possible"): The draft states the urgency function is "a weighted sum of **nine** explicit signals — `@mention`, `priority_sender`, `action_word`, `question`, `unread`, `no_reply`, `collaborator`, and three mutually exclusive age tiers". That enumeration is 7 non-age signals + 3 age tiers = **ten** signals. `coviber/urgency.py` `DEFAULT_WEIGHTS` has exactly 10 keys: mention, priority_sender, action_word, question, unread, no_reply, collaborator, age_7d, age_48h, age_24h. The paper's own §Contributions bullet on urgency later says "multi-signal urgency triage function" and the abstract says "multi-signal", but §1.2 explicitly numbers them "nine" while listing ten. This is an inconsistency the reader will catch immediately against Definition 4 later, and it directly contradicts urgency.py.
+%   
+%   (2) LOADER SIZE (Abstract): The abstract claims "a $\approx$10-line `Loader` that emits a canonical record". The six shipped loaders (jsonl.py 39, demo.py 71, imap.py 82, slackexport.py 95, webscrape.py 102, mbox.py 156 lines) are all an order of magnitude above ~10 lines. Even the abstract Loader base class in coviber/loaders/base.py is 41 lines. §Contributions correctly and consistently says "each in $O(10^{2})$ lines" — that lower bound in the abstract directly contradicts the same paper's later claim and the shipped code. If the intent is "the source-specific *seam* is ~10 lines" (as the base class method signature effectively is), the abstract needs to say so; taken as written it is refuted by every loader that actually ships.
+%   
+%   Other technical claims verified as accurate against the code:
+%   - "seven MCP tools over stdio" — recall, catch_me_up, who_is, project_status, graph_summary, voice_profile, refresh (mcp_server.py: 7 @mcp.tool()-decorated functions, mcp.run() over stdio).
+%   - "$U(r) \in [0,14]$" at default weights — urgency.py comment "Max achievable at defaults = 11 (non-age signals) + 3 (max age tier) = 14"; contract pinned by test_urgency_contract.
+%   - "content-hashed on its immutable fields (`text`, `subject`, `from_name`, `source`)" — record.py `__post_init__` calls `_hash(self.text, self.subject, self.from_name, self.source)`.
+%   - "Six built-in loaders … (demo, jsonl, mbox, imap, slackexport, webscrape)" — coviber/loaders/ ls matches exactly.
+%   - "core has no runtime dependencies outside the Python standard library; `[search]`, `[scrape]`, `[qdrant]`, and `[mcp]` are opt-in extras" — pyproject.toml `dependencies = []`, optional-dependencies keys exactly {scrape, search, qdrant, mcp, all, dev}.
+%   - "advisory file lock across write boundaries only, so concurrent ingest and MCP-server processes on the same data directory interleave safely" — store.py `_write_lock` uses fcntl/msvcrt on `.lock`, docstring "Readers never take it".
+%   - "configuration re-read per call so that operator edits take effect without a server restart" — mcp_server.py `_settings()` docstring "Re-read per call so every tool sees current config without a server restart".
+%   - "empty-corpus sentinel prevents fabricated style claims" — persona.py `VoiceProfile.system_prompt` checks `if self.n_messages == 0: return "No self-authored writing samples were found …"`.
+%   - "token-boundary skip filter" — urgency.py `should_skip` uses `re.search(rf"(?<![a-z0-9]){re.escape(s)}(?![a-z0-9])", …)` and DEFAULT_FYI matches on token boundaries per audit finding L5/#16.
+%   - "per-project pre-compiled word-boundary regex" — workgraph.py `self._project_patterns = [(p, re.compile(rf"\b{re.escape(p.lower())}\b")) for p in self.known_projects]`.
+%   - "four entity classes (people, projects, channels, tickets)" — WorkGraph.__init__ declares exactly these four defaultdicts.
+%   
+%   Fix the two claims above (10 signals, not 9; drop or reframe "~10-line Loader" in the abstract) and the section is otherwise fully backed by the shipped code.
+% Notes to assembler: "Section labels I referenced that the later sections must declare: \\label{sec:related} (§2), \\label{sec:system} (§3), \\label{sec:record} (§3.2), \\label{sec:ingestion} (§3.3), \\label{sec:workgraph} (§3.4), \\label{sec:urgency} (§3.5), \\label{sec:persona} (§3.6), \\label{sec:mcp} (§3.8), \\label
+
+\begin{abstract}
+Large language models forget everything between sessions. The cloud-hosted memory features shipped by leading assistants close that gap by uploading user context to a vendor, which is unacceptable for professional knowledge work under privacy, compliance, or air-gap constraints. This paper describes \emph{CoViber}, a local-first memory engine for AI-augmented knowledge work that exposes continuously-updated personal context to any Model Context Protocol (MCP) client without cloud egress. The system rests on four contributions: (i) a loader-agnostic ingestion architecture in which the only source-specific code is a $\approx$10-line \texttt{Loader} that emits a canonical record, so email, chat exports, web pages, and internal APIs flow through the same downstream pipeline; (ii) an incremental cross-source \emph{WorkGraph} that unifies people, projects, channels, and tickets in $O(1)$ per record; (iii) an inference-free statistical voice model that produces a drafting system prompt from a user's own sent messages without invoking an LLM; and (iv) a configurable multi-signal urgency function $U(r) \in [0,14]$ with a token-boundary skip filter for triage. All four pieces are exposed through seven MCP tools over stdio. The reference implementation is Apache-2.0, dependency-light (the core is stdlib-only), and evaluated on a fully synthetic corpus that ships with the package; benchmark numbers, at \SI{XXX}{records\per\second} ingest and \SI{XXX}{\milli\second} warm semantic search on $10^{5}$ records, are reproducible with \texttt{python bench/run.py}.
+\end{abstract}
+
+\section{Introduction}
+\label{sec:intro}
+
+Modern large language models (LLMs) are stateless across sessions. Each new
+conversation begins with an empty context window, and any prior interaction with
+the user --- what they are working on, whom they collaborate with, which
+messages already received a reply, what voice they write in --- must be
+re-established from scratch or reconstructed at query time from an external
+store. This limitation is well-known and has motivated two broad classes of
+remedies: static retrieval-augmented generation (RAG) over a corpus of
+documents~\cite{TODO-rag-lewis-2020}, and vendor-hosted memory features that
+persist user data in the model provider's cloud.
+
+Neither class addresses the working conditions of a professional knowledge
+worker. Static RAG assumes a slowly-changing corpus indexed once and queried
+many times; the target here is the opposite --- an inbox, a chat, a code-review
+queue, a scraped internal wiki --- where records arrive continuously and their
+salience decays on the order of hours. Vendor-hosted memory, by contrast,
+matches the continuous-update assumption but violates a hard constraint in every
+regulated or IP-sensitive workplace: user context (potentially containing
+customer data, unreleased architecture, or personnel matters) is transmitted to
+and retained on infrastructure the user does not control. Air-gapped
+environments, financial-services teams, healthcare, and any organisation with a
+DLP policy simply cannot use such features~\cite{TODO-privacy-llm-2024}.
+
+The gap between what LLMs need to be useful across sessions and what a
+knowledge worker can safely feed them is the problem this paper addresses. We
+argue that a memory engine for AI-augmented knowledge work should satisfy four
+properties simultaneously:
+
+\begin{enumerate}
+    \item \textbf{Local-first execution.} Records, embeddings, and derived
+    structures live on the user's machine; no data leaves the box unless the
+    operator explicitly configures a remote store.
+    \item \textbf{Loader-agnostic core.} Adding a new source (a bespoke CRM, a
+    ticketing system, an internal API) should require writing a source-specific
+    adapter only, not touching the graph, triage, or search components.
+    \item \textbf{Inference-free enrichment where possible.} Enrichment steps
+    that can be expressed statistically --- entity linking, voice modelling,
+    urgency scoring --- should not require an LLM call. Fewer inference calls
+    means lower latency, no per-query cost, and no additional trust boundary
+    around a hosted model.
+    \item \textbf{Standardised exposure to arbitrary LLM clients.} The memory
+    should be consumable from any assistant a user might reach for, without a
+    bespoke integration per client.
+\end{enumerate}
+
+\subsection{The design commitment}
+
+CoViber realises these four properties with a deliberately narrow architectural
+seam. All source-specific code lives behind a single \texttt{Loader} interface
+whose only obligation is to yield instances of a canonical \texttt{Record}
+dataclass (\S\ref{sec:record}). The record schema is content-hashed on its
+immutable fields (\texttt{text}, \texttt{subject}, \texttt{from\_name},
+\texttt{source}) so that re-ingesting the same message is a natural
+no-op rather than a duplication event. Everything downstream --- deduplication,
+the cross-source WorkGraph, the urgency queue, the semantic search index, the
+voice profile, and the MCP tool surface --- is loader-agnostic. Adding a source
+means writing roughly ten lines of Python; nothing in the ``brain'' changes.
+
+The exposure layer is the Model Context Protocol (MCP)~\cite{TODO-mcp-spec}, an
+emerging open standard for tools and context providers to expose capabilities
+to LLM clients over a well-defined JSON-RPC schema. MCP is the right layer for a
+memory engine because it decouples the memory implementation from the client:
+the same seven CoViber tools --- \texttt{recall}, \texttt{catch\_me\_up},
+\texttt{who\_is}, \texttt{project\_status}, \texttt{graph\_summary},
+\texttt{voice\_profile}, and \texttt{refresh} --- are consumed identically by
+Claude Desktop, Claude Code, and any other MCP-conformant client. The transport
+in the default configuration is standard input/output to a locally-spawned
+process, which keeps the entire round-trip on the machine.
+
+\subsection{Why inference-free where possible}
+
+Two of the four subsystems that could plausibly delegate to an LLM ---
+persona/voice modelling and urgency scoring --- instead use classical statistics
+and configurable rule-based signals. This is a deliberate tradeoff. LLM-based
+voice modelling would produce marginally more nuanced style transfer, but at
+the cost of a network round-trip (or a resident local model) per drafting
+call, plus opacity: the user cannot audit why a particular draft came out the
+way it did. CoViber's \texttt{VoiceProfile} is a small dataclass containing
+counts and rates (average words per message, formality index, opener/closer
+frequencies, signature vocabulary) computed from the user's own sent messages
+(\S\ref{sec:persona}), from which a compact drafting system prompt is emitted
+verbatim. Every field is inspectable; nothing is hallucinated.
+
+The urgency function similarly refuses inference. It is a weighted sum of
+nine explicit signals --- \texttt{@mention}, \texttt{priority\_sender},
+\texttt{action\_word}, \texttt{question}, \texttt{unread}, \texttt{no\_reply},
+\texttt{collaborator}, and three mutually exclusive age tiers --- with a
+token-boundary skip filter that suppresses bots, digests, and out-of-office
+noise before scoring. The default weights bound $U(r) \in [0, 14]$; the weights
+themselves, the priority-sender list, the collaborator list, and the skip
+lexicons are all configuration. The result is a triage that is fast (linear
+scan, no inference), reproducible (same input, same score), and explainable
+(the scored output carries the list of signals that fired).
+
+\subsection{Contributions}
+The specific contributions of this paper are as follows:
+\begin{itemize}
+    \item \textbf{A loader-agnostic ingestion architecture}
+    (\S\ref{sec:ingestion}) in which sources plug in through a single
+    \texttt{Loader} seam, with a content-hashed \texttt{Record} whose
+    identity is invariant under re-ingest. Six built-in loaders are shipped
+    (\texttt{demo}, \texttt{jsonl}, \texttt{mbox}, \texttt{imap},
+    \texttt{slackexport}, \texttt{webscrape}), each in $O(10^{2})$ lines.
+    \item \textbf{An incremental cross-source WorkGraph}
+    (\S\ref{sec:workgraph}) that maintains four entity classes (people,
+    projects, channels, tickets) with bidirectional edges built at $O(1)$
+    per record. Entity keys are case-normalised; ticket identifiers are
+    canonicalised; project matching is bounded by a per-project pre-compiled
+    word-boundary regex.
+    \item \textbf{An inference-free statistical voice model}
+    (\S\ref{sec:persona}) that emits a drafting system prompt directly from
+    a corpus of self-authored messages, with no LLM in the loop. An
+    empty-corpus sentinel prevents fabricated style claims.
+    \item \textbf{A multi-signal urgency triage function} (\S\ref{sec:urgency})
+    $U(r) : \mathrm{Record} \to \mathbb{N}$ with configurable weights, a
+    token-boundary skip filter to eliminate false-positive suppression on
+    substring matches, and a documented contract $U(r) \in [0, 14]$ at
+    default weights.
+    \item \textbf{An MCP-native exposure surface} (\S\ref{sec:mcp}) of seven
+    tools that make the memory queryable by any MCP-conformant LLM client
+    over stdio, with configuration re-read per call so that operator edits
+    take effect without a server restart.
+\end{itemize}
+
+Beyond the algorithmic contributions, the reference implementation is a design
+artefact in its own right: the core package has no runtime dependencies outside
+the Python standard library; \texttt{[search]}, \texttt{[scrape]},
+\texttt{[qdrant]}, and \texttt{[mcp]} are opt-in extras, each degrading
+gracefully when absent. Persistence uses an advisory file lock across write
+boundaries only, so concurrent ingest and MCP-server processes on the same
+data directory interleave safely without a transactional wrapper around the
+whole pipeline. All numbers reported in \S\ref{sec:eval} are produced by a
+single benchmark harness (\texttt{bench/run.py}) over a fully synthetic
+\texttt{demo} corpus that ships with the package.
+
+\subsection{Roadmap}
+The rest of the paper is organised as follows. Section~\ref{sec:related}
+positions CoViber against static-corpus RAG, agent frameworks, and
+vendor-hosted memory. Section~\ref{sec:system} formalises the four subsystems
+--- record schema and ingestion (\S\ref{sec:ingestion}), the WorkGraph
+(\S\ref{sec:workgraph}), the persona engine (\S\ref{sec:persona}), the urgency
+function (\S\ref{sec:urgency}), and the MCP tool surface (\S\ref{sec:mcp}) ---
+with algorithms, definitions, and complexity bounds against the shipped
+implementation. Section~\ref{sec:eval} reports throughput and search-latency
+measurements on the synthetic corpus at multiple scales, discusses when the
+default \texttt{JSONVectorStore} gives way to an optional \texttt{Qdrant}
+backend, and quantifies the tradeoff. Section~\ref{sec:discussion} discusses
+threats to validity, deliberate design invariants recorded in the codebase
+(content-hash id boundaries, per-call config re-reads, verbatim record
+storage), and directions for future work: incremental graph maintenance,
+richer person-alias resolution, and community-contributed loaders.

@@ -1,0 +1,84 @@
+% Verified: True
+% Notes to assembler: Section covers both §5 (Discussion/Limitations) and §6 (Future Work + Conclusion) per the prompt. Approx. 1.5 pages combined at single-column article class.\n\nCross-reference labels used (assembler should ensure earlier sections define these): sec:architecture, sec:evaluation, sec:ingestion, sec:wo
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+The design decisions catalogued in \S\ref{sec:architecture}--\S\ref{sec:evaluation} are neither uniformly optimal nor uniformly complete. This section discusses the tradeoffs the shipped code embraces and the boundaries it has not yet crossed. Every limitation named here corresponds to a concrete open issue on the project tracker; the intent is disclosure, not aspiration.
+
+\subsection{Alias resolution is partial}
+\label{sec:limit-alias}
+
+The \texttt{WorkGraph} in \texttt{workgraph.py} normalises person keys to lowercase, so that \texttt{Ada Byron} and \texttt{ada byron} collapse into a single node with a case-preserving \texttt{display\_name} field (the more capitalised form wins). This closes the trivial fragmentation observed in the pre-v0.4 corpus. It does \emph{not}, however, unify a display name against its handle-form counterpart: an email signed \texttt{Ada Byron} and a Slack mention of \texttt{@ada} remain two distinct nodes in the graph, because the extractor's only source of identity is the surface string appearing in \texttt{from\_name}, \texttt{recipient}, or a \verb|@|-mention token.
+
+Closing this gap requires an alias table --- either operator-supplied or learnt from co-occurrence over email $\leftrightarrow$ chat pairs --- and is tracked as issue~\#49. We defer it because the alternative --- fuzzy string matching --- silently over-merges (\texttt{Adam} into \texttt{Ada}), and the resulting false positives are far more damaging to a memory engine than the fragmentation they replace. A curated alias file is the honest solution; a similarity threshold is not.
+
+\subsection{Ingest complexity is $O(n)$, not $O(\Delta)$}
+\label{sec:limit-full-rebuild}
+
+\texttt{pipeline.ingest} rebuilds the \texttt{WorkGraph} from the entire store on every cycle. The relevant fragment is exact:
+
+\begin{verbatim}
+all_records = store.all()
+graph = WorkGraph(known_projects=settings.known_projects, you=settings.you)
+graph.ingest(all_records)
+store.save_graph(graph.to_dict())
+\end{verbatim}
+
+For a store of $n$ records this is $\Theta(n)$ per ingest regardless of how many records are new. In practice the constant is small --- see \S\ref{sec:evaluation} --- and at $2\times10^3$ records the rebuild is imperceptible. The cost grows linearly, however, and the graph structure lends itself naturally to an incremental variant: \texttt{Store.upsert} already returns the count of genuinely-new records, and each node update in \texttt{workgraph.\_ingest\_one} is $O(1)$ amortised, so an incremental path could touch only the delta. This is tracked as issue~\#18 and is scheduled for v0.6. The current implementation is retained because rebuild-from-scratch is the correct reference semantics: if the incremental variant ever diverges from the reference, the $O(n)$ path remains the ground truth for tests to compare against.
+
+\subsection{Vector-store ceiling}
+\label{sec:limit-vector-ceiling}
+
+The default \texttt{JSONVectorStore} serialises every embedding into a single \texttt{embeddings.json} file next to \texttt{records.jsonl}. Each recall performs a whole-file read; the cost is dominated by JSON parsing rather than the cosine computation. The docstring in \texttt{vector\_stores.py} states the operating envelope explicitly: ``Fine up to $\sim10^5$ records; past that the load-per-query cost dominates.''
+
+The \texttt{QdrantVectorStore} backend --- selected transparently when \texttt{COVIBER\_QDRANT\_URL} is set or a \texttt{qdrant} block appears in the config --- addresses this by delegating persistence and approximate nearest-neighbour search to a local Qdrant container. The interface a caller sees is unchanged (the \texttt{VectorStore} \texttt{Protocol} in \texttt{vector\_stores.py} is one method-set for both backends), but the query cost becomes independent of corpus size at the price of an extra process and the \verb|[qdrant]| optional dependency. Documentation of the exact crossover point --- where Qdrant starts beating the JSON backend on a warm cache --- is tracked as \#43/\#44, and the $10^5$-record bench is queued for v0.6 (\#48). We deliberately do not auto-promote to Qdrant: silent backend migration would obscure exactly the kind of operational commitment (a running Docker daemon) the operator has a right to make explicitly.
+
+\subsection{Inference-free voice: a considered floor}
+\label{sec:limit-persona}
+
+The persona engine in \texttt{persona.py} is entirely statistical. \texttt{VoiceProfile} carries seven scalars (\texttt{n\_messages}, \texttt{avg\_words}, \texttt{formality}, \texttt{emoji\_rate}, \texttt{question\_rate}, \texttt{exclaim\_rate}, and vocabulary top-$k$) plus opener and closer distributions, and \texttt{system\_prompt} deterministically templates these into a natural-language instruction for the downstream LLM. There is no fine-tuning, no gradient step, and no model call anywhere in the path.
+
+The tradeoff is candid. An LLM-based rewriter --- one that ingests the user's sent corpus and produces a per-user adapter or in-context few-shot exemplar --- would capture nuance the seven scalars cannot: sentence-level rhythm, sarcasm, the particular way a user hedges a decision. The cost, however, is exactly the privacy guarantee this project sells: the moment voice modelling requires an inference pass on user-authored content, some subset of that content leaves the process --- either to a hosted API, or to a local model whose weights and update path are themselves an attack surface. \texttt{persona.py} chooses the floor: profiles are cheap enough to recompute per call, private by construction, and interpretable end-to-end (an operator can read \texttt{system\_prompt} and immediately see what will be sent). Users who value nuance over deterministic locality can substitute their own \texttt{VoiceProfile.system\_prompt} at the callsite; the seam is one function.
+
+The empty-corpus case is worth flagging as a limitation, not a bug: if \texttt{from\_name == you} matches no record, \texttt{system\_prompt} returns a sentinel prompt (``No self-authored writing samples were found\ldots'') rather than fabricating a ``formal, $\sim 0$ words per message'' description from zero data. Callers who never label their own identity therefore receive no voice profile at all. This is disclosure, not degradation --- the alternative would silently mislead the LLM about a voice it has never seen.
+
+\subsection{Benchmark scope}
+\label{sec:limit-bench}
+
+The numbers reported in \S\ref{sec:evaluation} are derived by \texttt{bench/run.py} on a deterministically-inflated version of the 15-record demo corpus. The default scale is $2\times10^3$; the harness accepts \verb|--scale N| for arbitrary $n$ but the shipped README reports only the $2\times10^3$ point. Sampling curves at $10^4$ and $10^5$ --- specifically to characterise the JSON-vs-Qdrant crossover discussed in \S\ref{sec:limit-vector-ceiling} --- are queued for v0.6 as issue~\#48. The reader should treat the current numbers as characterising the small-corpus regime (a single knowledge worker's few-week backlog), not the archival regime.
+
+The bench also does not include a $p_{99}$ tail: it reports the median of a fixed repeat count via \texttt{statistics.median}. This is appropriate for a design paper documenting typical cost but is inadequate for anyone provisioning against a service-level objective. Extending the harness to emit a full latency distribution is out of scope for v0.5.
+
+\subsection{Records at rest, unencrypted}
+\label{sec:limit-verbatim}
+
+An invariant documented in \texttt{ARCHITECTURE.md} bears repeating here: records are stored verbatim on disk. \texttt{records.jsonl} contains the raw email and scraped content with no PII redaction or secret-scanning pass. This is consistent with the local-first thesis --- nothing leaves the machine --- but it means an operator who backs up, syncs, or screen-shares the \texttt{data\_dir} is exposing everything it contains. Encryption is the operator's responsibility (encrypted volume, encrypted backup); the engine does not simulate it. Users on shared or unattended machines should treat \texttt{data\_dir} as they would their local mailbox.
+
+\section{Future Work and Conclusion}
+\label{sec:future}
+
+Four threads on the tracker deserve explicit mention. Each addresses one of the limitations enumerated above and each is designed to preserve the local-first, MCP-native shape of the system rather than depart from it.
+
+\paragraph{Property-based tests over corpus invariants (\#47).}
+The current test suite is example-based: it exercises specific inputs against specific outputs. Several invariants of the corpus are more naturally stated as universal properties over generated inputs --- for instance, that \texttt{Store.upsert} is idempotent, that a \texttt{Record} round-trips through \texttt{to\_dict}/\texttt{from\_dict} without loss, that \texttt{urgency.score} is monotone in the number of firing signals, and that the \texttt{WorkGraph} produced by ingesting a stream is invariant to permutations of that stream's arrival order. Encoding these as Hypothesis strategies would find shape regressions the current tests miss.
+
+\paragraph{Streaming and incremental MCP tools (\#51).}
+Every MCP tool in \texttt{mcp\_server.py} today reads from disk end-to-end: \texttt{recall} loads the whole embedding index, \texttt{catch\_me\_up} rescores the full stream, \texttt{graph\_summary} deserialises the whole graph. The pattern is deliberate --- each call sees a fresh view of on-disk state --- but is not free at scale. Incremental variants (a background watcher that maintains a hot in-memory index, invalidated via file mtime) would let $\geq 10^5$-record corpora respond interactively. The current re-read-per-call semantics remain valuable as the reference against which the streaming variant must agree, so we do not plan to remove them.
+
+\paragraph{Draft-response orchestration engine (\#52).}
+The four contributions this paper describes --- ingestion, graph, urgency, and voice --- compose in an obvious way: the highest-ranked record from \texttt{build\_queue}, projected through the \texttt{WorkGraph} into the participants and context it touches, and rendered against the \texttt{VoiceProfile.system\_prompt}, is precisely the input an LLM needs to draft a response in the user's voice about the right piece of context at the right time. The composition is straightforward but not shipped: today the caller (a Claude Desktop session, say) is expected to stitch the three MCP tools together. A dedicated \texttt{draft\_response} tool that performs the composition end-to-end --- returning both the drafted body and a structured trace of which record, which participants, which voice signals fed the draft --- would collapse a common multi-turn interaction into one call.
+
+\paragraph{Brain memory layer (\#53).}
+The current \texttt{Store} holds records --- the raw stream. A brain layer would hold \emph{summaries}: durable, curated units of the form ``for project $P$, the current status is $S$ as of $t$; the last three decisions are $d_1, d_2, d_3$; the outstanding obligation from person $q$ is $o$.'' Summaries are cheap to compose from records but expensive to recompute on demand; storing them alongside the raw stream (as an append-only file with a supersession relation) turns ``catch me up on $P$'' from a scan into a lookup. The brain layer is a memoization of the WorkGraph plus the urgency queue projected through the persona, and it fits inside the existing storage abstraction as a second collection --- no new architecture, one new file.
+
+\subsection{Conclusion}
+\label{sec:conclusion}
+
+This paper described a memory engine for AI-augmented knowledge work built around four commitments: a canonical \texttt{Record} type populated by pluggable \texttt{Loader}s so the ingestion surface is the only source-specific code (\S\ref{sec:ingestion}); a \texttt{WorkGraph} that fuses people, projects, channels, and tickets across those sources into a single queryable structure (\S\ref{sec:workgraph}); a multi-signal \texttt{urgency} score, $U(r) \in [0, 14]$ at default weights and configurable to any bounded ceiling (\S\ref{sec:urgency}); and a statistical, inference-free \texttt{PersonaEngine} that summarises the operator's own writing into a system prompt any LLM client can consume (\S\ref{sec:persona}). Each is implemented in $\lesssim$ 250 lines of dependency-free Python; each degrades gracefully when optional extras (\verb|[search]|, \verb|[qdrant]|, \verb|[mcp]|) are absent.
+
+The result is exposed through an MCP server (\S\ref{sec:mcp}) whose seven tools --- \texttt{recall}, \texttt{catch\_me\_up}, \texttt{who\_is}, \texttt{project\_status}, \texttt{graph\_summary}, \texttt{voice\_profile}, \texttt{refresh} --- give any protocol-compliant LLM client the same view of the user's local context that the CLI does. The context does not leave the operator's disk: the transport is stdio to a local process, the vector index is a file on the same filesystem, and the persona engine performs no inference.
+
+The wider design point is that the tension between retrieval-augmented generation over static corpora and personalised, continually-updated context does not require a hosted service to resolve. A canonical record shape, a small collection of composable indices, and an interface any modern LLM client already speaks are sufficient to build memory that is at once continuous, personalised, and private. The gap between static-corpus RAG and continuous-context memory closes not by asking the operator to trade privacy for utility, but by placing the memory --- and every derived signal on top of it --- on the same machine as the operator, and speaking a protocol the LLM already understands.
+
+Source, benchmark harness, and synthetic corpus are released under Apache-2.0 at \url{https://github.com/TODO-repo-url}. The evaluation in \S\ref{sec:evaluation} reproduces via \verb|python bench/run.py| on the shipped demo data; no private inputs are required.

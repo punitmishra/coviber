@@ -1,0 +1,188 @@
+% Verified: True
+% Notes to assembler: Preamble deps needed: \\usepackage{algorithm}, \\usepackage{algpseudocode}, \\usepackage{booktabs}, \\usepackage{amsthm} with a `definition` theorem style (Definition 4 = urgency, Definition 5 = skip filter — numbering is intentional per the prompt), \\usepackage{siunitx} (not used here but consiste
+
+\subsection{Multi-Signal Urgency Triage}
+\label{sec:urgency}
+
+Once the store is populated and enriched with a \WorkGraph{} (\S\ref{sec:workgraph}),
+the remaining problem is inbox-scale: how does the system decide what,
+among $N$ heterogeneous records, actually deserves the user's attention
+this hour?  \coviber{}'s answer is a rule-based additive scorer with a
+prefilter, implemented in \path{coviber/urgency.py}. The design goal is
+explicit: the scoring function must be inspectable, deterministic, and
+reproducible on-device, with no reliance on a hosted classifier and no
+labeled training corpus.
+
+\subsubsection{Formal definition}
+
+Let $\mathcal{S} = \{s_1, \ldots, s_{10}\}$ be the fixed set of signal
+predicates enumerated in Table~\ref{tab:signals}. Each signal is a
+Boolean predicate $s_i : \mathcal{R} \to \{0,1\}$ over a record $r$
+(cf.\ Definition~\ref{def:record}). Let $w : \mathcal{S} \to
+\mathbb{Z}_{\ge 0}$ be a configured weight map. The three age-tier
+signals $\{s_{\text{age\_7d}}, s_{\text{age\_48h}}, s_{\text{age\_24h}}\}$
+are mutually exclusive by construction (they are the branches of a
+single \texttt{if/elif/elif} on record age), so at most one fires per
+record.
+
+\begin{definition}[Urgency score]
+\label{def:urgency}
+The urgency of a record $r$ is
+\[
+U(r) \;=\; \sum_{s \in S(r)} w(s), \qquad
+S(r) \;=\; \{\, s \in \mathcal{S} \mid s(r) = 1 \,\},
+\]
+with a signal contributing zero (and being treated as disabled) iff
+$w(s) \le 0$.
+\end{definition}
+
+At the default weights shipped with the package
+(Table~\ref{tab:signals}), the seven non-age signals sum to $11$ and the
+maximal age tier contributes $3$, so $U(r) \in [0, 14]$.  This
+$[0,14]$ contract is pinned by a regression test
+(\texttt{test\_urgency\_contract}); no clamp is applied at runtime.
+Under a custom weight map the ceiling shifts in proportion to the
+caller's choices, which is deliberate: silent clamping would mask a
+misconfiguration rather than surface it. Configs that supply only a
+partial weight dictionary are merged key-by-key against the defaults,
+unknown keys are surfaced as \texttt{RuntimeWarning}, and non-integer
+values raise a \texttt{ValueError} that names the offending key. Weight
+$0$ is a first-class way to disable a signal.
+
+\begin{definition}[Skip filter]
+\label{def:skip}
+A record $r$ is \emph{skipped} (excluded from the queue before scoring)
+iff
+\[
+\mathrm{skip}(r) \;=\; \mathrm{skip\_sender}(r) \;\lor\; \mathrm{skip\_subject}(r) \;\lor\; \mathrm{fyi}(r),
+\]
+where $\mathrm{skip\_sender}$ matches any element of
+$\mathtt{cfg.skip\_senders}$ against \texttt{r.from\_name} on token
+boundaries, $\mathrm{skip\_subject}$ matches any element of
+$\mathtt{cfg.skip\_subjects}$ as a case-insensitive substring of
+\texttt{r.subject}, and $\mathrm{fyi}$ matches any element of the FYI
+lexicon (defaults: \texttt{fyi}, \texttt{no action needed},
+\texttt{no reply needed}, \texttt{just so you know}) against the
+concatenation of subject and body, again on token boundaries.
+\end{definition}
+
+The token-boundary discipline for both $\mathrm{skip\_sender}$ and
+$\mathrm{fyi}$ is load-bearing. Prior versions of \coviber{} matched
+these lexicons as raw substrings, which caused two classes of false
+positive: (i) colleagues whose surname literally contained a skipped
+token (e.g. \texttt{"Abbott"} matching \texttt{"bot"}), and (ii)
+common English words containing the trigram \texttt{"fyi"} inside them
+(\texttt{"justifying"}, \texttt{"notifying"}, \texttt{"typify"}). Both
+would silently drop legitimate obligations from the queue. The v0.4/L5
+audit tightened both matches to word-boundary regexes of the form
+\verb|(?<![a-z0-9])<lex>(?![a-z0-9])|; the fix is small, but it is the
+canonical example of the transparency guarantee that motivates
+rule-based scoring in the first place.
+
+The complete triage procedure is given in Algorithm~\ref{alg:triage}.
+Three additional filters run in the loop but are not part of
+Definition~\ref{def:skip}: self-authored records (where
+\texttt{r.from\_name} equals \texttt{cfg.you}) are dropped as
+non-obligations, the skip filter runs first, and any record that scores
+$U(r) \le 0$ after scoring is dropped as noise. The surviving records
+are sorted by $(-U(r), r.\mathrm{ts})$ so that ties break in favour of
+older records.
+
+\begin{algorithm}
+\caption{Triage: filter, score, sort.}
+\label{alg:triage}
+\begin{algorithmic}[1]
+\Require records $R$, urgency config $\mathrm{cfg}$
+\Ensure ranked queue $Q$ of $\{\mathrm{record}, U, S(r)\}$
+\State $Q \gets [\,]$
+\ForAll{$r \in R$}
+  \If{$r.\mathrm{from\_name}.\mathrm{lower}() = \mathrm{cfg.you}.\mathrm{lower}()$} \State \textbf{continue} \EndIf
+  \If{$\mathrm{skip}(r, \mathrm{cfg}) \neq \varnothing$} \State \textbf{continue} \EndIf
+  \State $(u, S) \gets \mathrm{score}(r, \mathrm{cfg})$
+  \If{$u \le 0$} \State \textbf{continue} \EndIf
+  \State $Q.\mathrm{append}(\{\mathrm{record}\!:\!r,\, U\!:\!u,\, S\!:\!S\})$
+\EndFor
+\State \Return $Q$ sorted by $(-U, r.\mathrm{ts})$
+\end{algorithmic}
+\end{algorithm}
+
+Complexity is $O(|R| \cdot k)$ per call, with $k$ the maximum lexicon
+size (action words, priority senders, collaborators, skip lexicons).
+The predicates are each $O(1)$ or an $O(k)$ substring/regex scan over a
+bounded token blob; no cross-record work is done, so triage scales
+linearly with the store and admits trivial parallelisation.
+
+\subsubsection{The signal set}
+
+\begin{table*}[t]
+\centering
+\small
+\caption{The ten urgency signal predicates. Default weights sum to
+$11$ (non-age) plus at most $3$ (age tier), giving the
+$U(r) \in [0, 14]$ contract at defaults. Weights are per-key
+overridable; unknown keys warn, non-integers raise.}
+\label{tab:signals}
+\begin{tabular}{lcp{9.2cm}}
+\toprule
+\textbf{Signal} & \textbf{Default $w$} & \textbf{Predicate / rationale} \\
+\midrule
+\texttt{mention}         & 3 & Regex \verb|@<you>\b| matches in \texttt{r.text} (case-insensitive). Empty \texttt{cfg.you} is guarded to avoid collapsing the regex to \verb|@\b|, which would fire on every raw \texttt{@}. Direct addressing is the single strongest human signal of obligation. \\
+\texttt{priority\_sender} & 2 & \texttt{r.from\_name.lower()} $\in$ \texttt{cfg.priority\_senders}. Configured per-user (managers, VIPs). Off by default (empty set); nothing about any specific person or organization is baked in. \\
+\texttt{action\_word}    & 2 & Any token from the action lexicon (defaults: \texttt{please}, \texttt{can you}, \texttt{need}, \texttt{review}, \texttt{approve}, \texttt{decision}, \texttt{deadline}, \texttt{asap}, \texttt{urgent}, \texttt{waiting on}, \texttt{action required}, \dots) appears in \texttt{subject $\|$ text}. Language-level cue that a reply is expected. \\
+\texttt{question}        & 1 & \texttt{'?'} in \texttt{r.text}. Weak cue but cheap and orthogonal to action words. \\
+\texttt{unread}          & 1 & \texttt{r.unread} is true. Loader-supplied; degrades gracefully to $0$ for sources with no read state. \\
+\texttt{no\_reply}       & 1 & \texttt{r.thread\_id} is set and \texttt{r.replied} is false --- the user has not yet responded in a live thread. \\
+\texttt{collaborator}    & 1 & \texttt{r.from\_name.lower()} $\in$ \texttt{cfg.collaborators}. Nudges known peers up without over-boosting them. \\
+\texttt{age\_7d}         & 3 & Record age $> 168$\,h. Mutually exclusive with the finer age tiers. Escalates neglected obligations. \\
+\texttt{age\_48h}        & 2 & Record age $\in (48, 168]$\,h. \\
+\texttt{age\_24h}        & 1 & Record age $\in (24, 48]$\,h. \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+Two properties of the signal set deserve emphasis. First, the signals
+are \emph{orthogonal by design}: \texttt{mention} is content-derived,
+\texttt{priority\_sender} is identity-derived, \texttt{unread} is
+platform-state-derived, and the age tiers are time-derived. A single
+record is expected to fire two to four signals; the arithmetic sum is
+then a joint score across independent evidence axes. Second, all
+identity-bearing lexicons --- priority senders, collaborators, action
+words, skip senders/subjects --- default either to an empty set or to a
+generic vocabulary (mail-bot names, ``weekly digest'' subjects). No
+individual person or organization is hard-coded. This is what makes the
+scorer portable across users without a preprocessing step and safe to
+ship as an open-source default.
+
+\subsubsection{Design contrast: rule-based vs.\ learned}
+
+The prevailing academic and industrial approach to inbox
+prioritisation is a supervised classifier ---
+\cite{TODO-horvitz-priorities} in the classical setting, and more
+recently BERT-style text encoders or LLM zero-shot rankers fronted by a
+managed API. Both classes buy accuracy at three costs \coviber{}
+declines to pay:
+
+\begin{enumerate}
+\item \textbf{Labeled data.} A classifier needs per-user labels
+  (\emph{this was urgent}, \emph{this was noise}) to be well-calibrated
+  for a specific mailbox. Rule-based scoring calibrates via
+  configuration, which the user writes once and can inspect.
+\item \textbf{Cloud egress.} Zero-shot LLM ranking exports the entire
+  inbox contents to a hosted model. \coviber{}'s target deployment is
+  local-first over sensitive corpora (\S\ref{sec:threat-model}); this
+  is a non-starter.
+\item \textbf{Opacity.} A neural score is a scalar with no
+  human-legible provenance. Definition~\ref{def:urgency} returns
+  $(U(r), S(r))$: every triage decision ships with the list of signals
+  that fired and their individual weights, which is what makes the FYI
+  regression above visible in the first place.
+\end{enumerate}
+
+The tradeoff is real: rule-based scoring cannot learn user-specific
+idioms without configuration edits, and it will underrank a
+subtly-urgent record that fires zero signals. The system is honest
+about this: the persona layer (\S\ref{sec:persona}) and the MCP recall
+surface (\S\ref{sec:mcp}) are how a downstream LLM client re-ranks or
+overrides triage output on demand. Urgency is the fast, transparent
+first pass; the LLM is the slow, contextual second pass.
+
