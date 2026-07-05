@@ -24,7 +24,7 @@ source-independent.
 | `workgraph.py` | Incremental entity extraction + bidirectional links, O(1)/record | 3.4 |
 | `urgency.py` | Multi-signal urgency score + skip filter | 3.5 |
 | `persona.py` | Statistical, inference-free voice model | 3.6 |
-| `store.py` | Dedup persistence + local semantic search | 3.3, 3.7 |
+| `store.py` | Dedup persistence (writers serialize on an advisory file lock) + local semantic search | 3.3, 3.7 |
 | `pipeline.py` | `ingest()` cycle: load → store → graph → (triage on demand) | 3.3 |
 | `mcp_server.py` | MCP tools over stdio (`recall`, `catch_me_up`, `who_is`, …) | 3.8 |
 
