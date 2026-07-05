@@ -79,7 +79,10 @@ class Store:
         # the lock must cover the read too, or two writers interleave read-merge-
         # rewrite and the last one silently drops the other's records
         with _write_lock(self.dir):
-            existing = {r.id: r for r in self.all()}
+            parsed, corrupt = self._read_all()
+            if corrupt:
+                self._quarantine(corrupt)
+            existing = {r.id: r for r in parsed}
             n_new = 0
             for r in records:
                 if r.id not in existing:
@@ -94,20 +97,40 @@ class Store:
         return n_new
 
     def all(self) -> list[Record]:
+        parsed, _ = self._read_all()
+        return parsed
+
+    def _read_all(self) -> tuple[list[Record], list[str]]:
+        """Parse records.jsonl into (records, raw-corrupt-lines). Side-effect-free."""
         if not self.records_path.exists():
-            return []
-        out = []
+            return [], []
+        out: list[Record] = []
+        bad: list[str] = []
         with self.records_path.open(encoding="utf-8") as f:
             for lineno, line in enumerate(f, 1):
-                line = line.strip()
-                if not line:
+                stripped = line.strip()
+                if not stripped:
                     continue
                 try:
-                    out.append(Record.from_dict(json.loads(line)))
+                    out.append(Record.from_dict(json.loads(stripped)))
                 except (json.JSONDecodeError, TypeError) as e:
                     print(f"coviber: skipping corrupt record {self.records_path}:{lineno}: {e}",
                           file=sys.stderr)
-        return out
+                    bad.append(line.rstrip("\n"))
+        return out, bad
+
+    def _quarantine(self, lines: list[str]):
+        """Append unparseable lines verbatim to records.jsonl.bad before we drop
+        them from records.jsonl on rewrite. For a memory product, losing data
+        silently is the worst failure mode — better a growing quarantine file
+        we can inspect than lines that vanish on the next upsert.
+        """
+        bad_path = self.records_path.with_suffix(".jsonl.bad")
+        with bad_path.open("a", encoding="utf-8") as f:
+            for line in lines:
+                f.write(line + "\n")
+        print(f"coviber: quarantined {len(lines)} corrupt line(s) → {bad_path}",
+              file=sys.stderr)
 
     # --- semantic / keyword search ---
     def search(self, query: str, limit: int = 8) -> list[tuple[float, Record]]:

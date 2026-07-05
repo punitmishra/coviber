@@ -63,3 +63,24 @@ def test_upsert_n_new_under_lock(tmp_path):
     assert store.upsert(recs) == 3
     assert store.upsert(recs + [Record(source="t", text="m3")]) == 1  # re-upsert dedupes, one novel
     assert len(store.all()) == 4
+
+
+def test_upsert_quarantines_corrupt_lines(tmp_path):
+    """Corrupt lines must not vanish silently on rewrite — they belong in a
+    sidecar file so the operator can inspect and recover them."""
+    store = Store(tmp_path)
+    # seed a valid record
+    store.upsert([Record(source="t", text="hello")])
+    # inject a corrupt line at the end of records.jsonl
+    with store.records_path.open("a", encoding="utf-8") as f:
+        f.write("{not json but not empty either\n")
+    # upsert triggers rewrite → corrupt line quarantined, then dropped from records.jsonl
+    store.upsert([Record(source="t", text="world")])
+    bad_path = store.records_path.with_suffix(".jsonl.bad")
+    assert bad_path.exists()
+    assert "{not json but not empty either" in bad_path.read_text(encoding="utf-8")
+    # parsed records survive
+    assert {r.text for r in store.all()} == {"hello", "world"}
+    # idempotent: rewriting again does not duplicate the quarantined line
+    store.upsert([Record(source="t", text="third")])
+    assert bad_path.read_text(encoding="utf-8").count("{not json") == 1
