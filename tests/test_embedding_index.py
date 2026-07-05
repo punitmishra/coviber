@@ -69,7 +69,10 @@ def test_first_search_populates_cache_and_ranks_by_cosine():
         assert len(hits) == 2
         top_score, top_rec = hits[0]
         assert isinstance(top_score, float) and isinstance(top_rec, Record)
-        assert top_rec.subject == "subj 1" and abs(top_score - 1.0) < 1e-9
+        # Vectors are persisted at float32 precision (halves JSON size vs the
+        # float64 upcast); cosine on normalized float32 vectors stays within
+        # ~2e-8 of 1.0, so 1e-6 is a safe tolerance without losing signal.
+        assert top_rec.subject == "subj 1" and abs(top_score - 1.0) < 1e-6
         data = json.loads(store.embeddings_path.read_text(encoding="utf-8"))
         assert data["model"] == EMBED_MODEL
         assert set(data["vectors"]) == {r.id for r in recs}
