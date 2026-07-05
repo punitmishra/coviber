@@ -1,0 +1,108 @@
+% CoViber — Continuous Context Replication for AI-Augmented Knowledge Work
+%
+% Source layout: this file assembles individual sections from paper/sections/
+% and the bibliography from paper/references.bib. Build with:
+%   cd paper/ && make          # produces whitepaper.pdf
+% or:
+%   pdflatex whitepaper && bibtex whitepaper && pdflatex whitepaper && pdflatex whitepaper
+%
+% First-draft status: sections are the output of the paper-drafter workflow
+% (task w0wqitbq7). 4 of 12 sections passed adversarial verification cleanly;
+% the other 8 have refutation notes at the top of their .tex files pointing
+% at specific factual claims that need correction before submission. See
+% paper/UNRESOLVED.md for the full list of open citations and eval numbers.
+
+\documentclass[11pt,letterpaper]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+
+% Standard scientific-paper packages
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{siunitx}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage[capitalize,noabbrev]{cleveref}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{listings}
+
+% Code-listing style tuned for Python
+\lstset{
+  basicstyle=\ttfamily\small,
+  keywordstyle=\bfseries,
+  commentstyle=\itshape\color{gray},
+  showstringspaces=false,
+  frame=single,
+  frameround=tttt,
+  breaklines=true,
+  language=Python,
+}
+
+% Hyperref polish
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!50!black,
+  citecolor=blue!50!black,
+  urlcolor=blue!50!black,
+}
+
+\title{
+  CoViber: Continuous Context Replication\\
+  for AI-Augmented Knowledge Work
+}
+\author{Punit Mishra}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+% -----------------------------------------------------------------------
+%  §1  Abstract + Introduction
+% -----------------------------------------------------------------------
+\input{sections/abstract-intro.tex}
+
+% -----------------------------------------------------------------------
+%  §2  Related Work
+% -----------------------------------------------------------------------
+\input{sections/related-work.tex}
+
+% -----------------------------------------------------------------------
+%  §3  System
+% -----------------------------------------------------------------------
+\input{sections/architecture.tex}
+\input{sections/record-loader.tex}
+\input{sections/workgraph.tex}
+\input{sections/urgency.tex}
+\input{sections/persona.tex}
+\input{sections/store-vectors.tex}
+\input{sections/mcp-interface.tex}
+
+% -----------------------------------------------------------------------
+%  §4  Evaluation
+% -----------------------------------------------------------------------
+\input{sections/evaluation.tex}
+
+% -----------------------------------------------------------------------
+%  §5  Discussion, limitations, future work, conclusion
+% -----------------------------------------------------------------------
+\input{sections/discussion.tex}
+
+% -----------------------------------------------------------------------
+%  Bibliography
+% -----------------------------------------------------------------------
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+% -----------------------------------------------------------------------
+%  Appendices
+% -----------------------------------------------------------------------
+\appendix
+\input{sections/appendix.tex}
+
+\end{document}

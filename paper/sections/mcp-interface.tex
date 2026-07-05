@@ -1,0 +1,46 @@
+% Verified: True
+% Notes to assembler: Section uses \subsection{...} and \label{sec:mcp} — assembler should verify parent \section{} (System Design, §3) exists and adjust nesting if needed.
+
+Cross-references used: \ref{sec:ingestion}, \ref{sec:workgraph}, \ref{sec:urgency}, \ref{sec:persona}. Ensure these labels match what the sibling se
+
+\subsection{The MCP-Native Interface}
+\label{sec:mcp}
+
+The Model Context Protocol (MCP) is a JSON-RPC framing specification for exposing tools, resources, and prompts to a host LLM client~\cite{TODO-mcp-spec}. A conformant \emph{server} advertises a schema-typed set of tools; a conformant \emph{client} (Claude Desktop, Claude Code, or any third-party host that implements the same specification) discovers those tools at startup and marshals structured calls into and out of the model. The protocol deliberately separates the memory substrate from the reasoning agent: a memory engine that speaks MCP inherits every current and future client for free, and, symmetrically, an agent that speaks MCP inherits every memory engine.
+
+This separation is the design commitment of CoViber\Hyphdash{}\textsc{oss}. The pipeline of \S\ref{sec:ingestion}\Hyphdash\S\ref{sec:urgency} produces a purely local artifact set --- a deduped record log, a work graph, and (optionally) a vector index --- with no direct client coupling. The MCP server is a thin adapter that projects those artifacts into the seven tool signatures listed in Table~\ref{tab:mcp-tools}. Every capability the whitepaper describes is reachable through this surface; there is no privileged client and no ``native'' UI.
+
+\begin{table}[t]
+\small
+\centering
+\begin{tabular}{@{}p{0.28\linewidth}p{0.66\linewidth}@{}}
+\toprule
+\textbf{Tool} & \textbf{Semantics} \\
+\midrule
+\texttt{recall(query, limit=6)} & Semantic (or keyword-fallback) search over the local record log, returning the top-$k$ records by cosine similarity to the query. \\
+\texttt{catch\_me\_up(limit=10)} & The urgency-ranked action queue $Q$ of \S\ref{sec:urgency}, truncated to \texttt{limit} highest-scoring records with their firing signals. \\
+\texttt{who\_is(name)} & The person node from the work graph (\S\ref{sec:workgraph}); case-insensitive on \texttt{name}, returns platforms, projects, channels, and interaction count. \\
+\texttt{project\_status(name)} & The project node from the work graph: participants, channels, and cross-referenced tickets. \\
+\texttt{graph\_summary()} & Aggregate counts (\texttt{people}, \texttt{projects}, \texttt{channels}, \texttt{tickets}), the enumerated project list, and the top eight most-interactive people. \\
+\texttt{voice\_profile()} & The statistical \texttt{VoiceProfile} of \S\ref{sec:persona} learned over self-authored records, paired with a ready-to-paste \texttt{system\_prompt(you)}. \\
+\texttt{refresh(loader, path="")} & Trigger one \(\text{load} \to \text{store} \to \text{graph}\) cycle through any registered loader; returns a stats string. \\
+\bottomrule
+\end{tabular}
+\caption{The MCP tool surface exposed by \texttt{coviber.mcp\_server}. Each tool is a single-purpose projection of a pipeline artifact; no tool composes state across calls.}
+\label{tab:mcp-tools}
+\end{table}
+
+\paragraph{Configuration parity and hot reload.}
+The MCP server and the command-line entry point share one settings parser (\texttt{coviber.config.read\_config}), so an operator can point \texttt{coviber triage --config foo.yaml} and \texttt{coviber serve --config foo.yaml} at the same file with identical semantics. Crucially, the server \emph{re-reads} the config on every tool invocation via a private \texttt{\_settings()} helper: an edit to the YAML file --- adding a priority sender, adjusting an urgency weight, switching the loader --- takes effect on the next call without restarting the process or reattaching the client. Environment variables \texttt{COVIBER\_CONFIG}, \texttt{COVIBER\_DATA\_DIR}, and \texttt{COVIBER\_YOU} act as overrides, evaluated in the same order at every call.
+
+\paragraph{Defensive graph reads.}
+Three tools (\texttt{who\_is}, \texttt{project\_status}, \texttt{graph\_summary}) consume \texttt{workgraph.json}. The read path is centralized in \texttt{Store.load\_graph}, which returns a \texttt{dict} on success and a human-readable string sentinel on either of two failure modes: (a) the file does not exist yet --- i.e.\ the operator has not run \texttt{coviber ingest} --- or (b) the file exists but fails to parse (a legacy layout, a hand-edit, external corruption). Each MCP tool inspects the return type and forwards the sentinel verbatim, so a torn graph produces a diagnostic message on the client rather than a Python traceback across the JSON-RPC boundary. All internal accesses use \texttt{dict.get} with defaults, so an incomplete graph (missing \texttt{tickets}, older schema) still yields a valid summary.
+
+\paragraph{Loader errors surface as strings.}
+The \texttt{refresh} tool catches the enumerated set \{\texttt{KeyError}, \texttt{ValueError}, \texttt{FileNotFoundError}, \texttt{IsADirectoryError}, \texttt{PermissionError}, \texttt{OSError}\} and converts each to a one-line error string of the form \texttt{"refresh failed ($T$: $\dots$)"}. \texttt{KeyError} covers an unknown loader name; the remaining exceptions cover the file-system paths a loader can plausibly touch. \texttt{ImportError} is deliberately \emph{not} caught: it indicates the operator requested a loader gated on an optional extra (\texttt{[scrape]}, \texttt{[qdrant]}) without installing it, which is a setup problem worth surfacing plainly. All other exceptions propagate to FastMCP, which converts them to a per-tool error without killing the server.
+
+\paragraph{Transport and privacy invariant.}
+The server binds only to standard input and output; there is no listening socket, and one server process serves at most one client at a time. Combined with the local-first pipeline of \S\ref{sec:ingestion}, this yields a structural privacy invariant: the only network traffic issued by CoViber\Hyphdash{}\textsc{oss} is whatever the \texttt{[scrape]} extra (an operator-triggered web fetch inside a \texttt{refresh} call) or the \texttt{[qdrant]} extra (a connection to a Qdrant instance the operator configured) emits at the operator's explicit request. There is no telemetry channel, no update check, and no upstream inference call --- the persona module is inference-free by construction (\S\ref{sec:persona}), and the embedding model, when enabled, runs locally through \texttt{sentence-transformers}.
+
+\paragraph{Deployment.}
+A client's configuration --- e.g.\ Claude Desktop's \texttt{claude\_desktop\_config.json} --- registers the server as a stdio command, \texttt{coviber serve}, optionally with \texttt{--config} and \texttt{--data-dir} flags. The client spawns one server per session, discovers the seven tools, and thereafter treats them like any other MCP capability. The same server binary is consumed by Claude Code from the command line and, in principle, by any third-party MCP host: the memory engine is model- and vendor-agnostic by construction.

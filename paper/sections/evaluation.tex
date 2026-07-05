@@ -1,0 +1,254 @@
+% Verified: False
+% Refutation notes:
+%   §4.5 (Persona-profile determinism) makes an empirical claim about the demo corpus that is contradicted by the shipped code. Specifically:
+%   
+%   1. "Empirically, on the demo corpus's three authored messages the top opener ('Hi'), top closer ('Thanks'), and top twelve vocabulary items each have strict count leads, so the system_prompt output ... is identical across all 3! = 6 permutations of the input."
+%   
+%   Tracing persona.learn against demo.py's three from_name=="you" messages:
+%   
+%   - Msg 1 first line "Hi Grace, reviewed the plan — looks good to ship. One ask: let's gate the rollout on the canary metrics. Thanks, " → _GREETING matches "hi" → openers["Hi"] += 1.
+%   - Msg 2 first line "Thanks for flagging — looking now. Can you drop the trace id? Will patch today." → _GREETING matches "thanks" (it is one of the greeting alternatives in `r"^\s*(hi|hey|hello|dear|good morning|good afternoon|thanks|thank you|team)\b"`) → openers["Thanks"] += 1.
+%   - Msg 3 first line "Nice approach on the backoff. ..." → no match.
+%   
+%   Result: openers = Counter({"Hi": 1, "Thanks": 1}) — a tie, NOT a strict count lead. Under Counter.most_common's insertion-order tie-break, top_openers[0][0] is "Hi" for orderings that see msg 1 before msg 2, and "Thanks" for the reverse orderings. The system_prompt reads exactly top_openers[0][0], so it is NOT identical across all 6 permutations — it changes depending on which authored message is encountered first.
+%   
+%   2. The closer claim is even more directly wrong. Per persona.py's L6/#26 fix, `last = stripped_lines[-1] if len(stripped_lines) > 1 else ""` — a single-line message contributes no closer. All three authored demo messages are single-line (no `\n`), so closers = Counter() (empty). top_closers is empty, and system_prompt uses its hardcoded fallback `cl = "Thanks"` (persona.py line 55: `cl = self.top_closers[0][0] if self.top_closers else "Thanks"`). The draft attributes the "Thanks" in the output to "top closer" and claims a strict count lead there — neither is true. The value is constant only because it's a fallback constant, not because a strict lead exists in top_closers.
+%   
+%   3. The draft's own assembler note correctly claims "vocabulary is 3/7/4 and 1.00 by construction" for the work-graph table (§4.4), which I verified against the code and demo corpus — that part is fine. But the persona empirical paragraph in §4.5 makes a stronger statement than the code supports.
+%   
+%   The Proposition itself and the proof sketch are correct — that's a general statement about the algorithm. Only the specific empirical claim about the demo corpus is refuted. All other claims in the section (MD5 record ids, bench harness details including repeat counts of 3 vs 5, Store.last_search_backend behavior, JSON whole-file load per query, docstring quote about ~10^5 records, work-graph ground truth 3/7/4, project-match word-boundary, ticket normalization for "PR #482" variants, case-preserving people node display_name, cited audit findings L4/#11 and L4/#14, inference-free / counter-based persona) match the shipped code exactly.
+%   
+%   Recommended fix: either drop the "empirically ... strict count leads ... identical across all 3! = 6 permutations" sentence entirely, or reword it to reflect that (a) top_openers has a 1-1 tie between "Hi" and "Thanks" so the emitted opener is order-dependent under insertion-order tie-breaking, and (b) top_closers is empty on the demo corpus (single-line messages), so the "Thanks" that appears in system_prompt comes from the hardcoded fallback and is order-independent for that trivial reason.
+% Notes to assembler: Preamble additions needed:
+  - \\usepackage{siunitx}  (for \\SI{XXX}{\\milli\\second})
+  - \\usepackage{booktabs} (for \\toprule/\\midrule/\\bottomrule)
+  - \\usepackage{amsthm}   (for the \\begin{proposition} block — either define a proposition environment via \\newtheorem{proposition}{Proposition}
+
+\section{Evaluation}
+\label{sec:eval}
+
+The evaluation has three goals: (i) establish that each stage of the pipeline
+scales to the corpus sizes a single knowledge worker actually accumulates over
+a career (order $10^{5}$ records), (ii) show that the pluggable vector backend
+crosses over from the zero-dependency JSON store to a server-side ANN index at
+a predictable, corpus-size boundary, and (iii) sanity-check the deterministic
+components (work-graph extraction, persona statistics) on the ground-truth demo
+corpus. All experiments run on the synthetic \texttt{demo} loader that ships with
+the package (\S\ref{sec:synthetic-corpus}); no proprietary data is involved and
+every number in this section is reproducible via a single command:
+\begin{center}
+\texttt{python bench/run.py -{}-scale <N>}
+\end{center}
+
+\subsection{Reproducibility harness}
+\label{sec:bench-harness}
+
+The harness in \texttt{bench/run.py} deterministically expands the fifteen-record
+demo corpus to a target scale $N$ by cycling the templates and appending a
+per-record index to the \texttt{subject} and \texttt{text} fields, so that record
+identity (an MD5 over the salient fields, see \S\ref{sec:record-model}) remains
+unique. It then times the four pipeline stages named in the whitepaper hot path,
+each as the median of $k \in \{3,5\}$ repeats measured with
+\texttt{time.perf\_counter}: ingest with deduplication into the JSONL store,
+work-graph construction, full-scan urgency triage, and top-$8$ semantic search
+against the pluggable vector backend. The search timing is deliberately the
+\emph{warm} median: the first repeat pays the encoder-load and cache-population
+cost, the subsequent repeats measure query-only latency, which is the metric
+that matters for interactive MCP use. The backend that actually served the
+query is recorded (\texttt{Store.last\_search\_backend}) so the reported number
+is never ambiguous between the JSON path, the Qdrant path, and the keyword
+fallback.
+
+\subsection{End-to-end latency by stage}
+\label{sec:eval-latency}
+
+Table~\ref{tab:latency} reports median wall-clock latency for each hot-path
+stage at three corpus scales. The numbers reflect the JSON vector backend
+(\texttt{JSONVectorStore}) — the zero-dependency default — on a single
+commodity laptop; the exact hardware fingerprint is written into the results
+file described in \S\ref{sec:eval-repro}.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lrrr}
+\toprule
+\textbf{Stage} & \textbf{$N{=}2\,000$} & \textbf{$N{=}10^{4}$} & \textbf{$N{=}10^{5}$} \\
+\midrule
+Ingest + dedup (JSONL) & \SI{XXX}{\milli\second} & \SI{XXX}{\milli\second} & \SI{XXX}{\milli\second} \\
+Work-graph build       & \SI{XXX}{\milli\second} & \SI{XXX}{\milli\second} & \SI{XXX}{\milli\second} \\
+Urgency triage (full scan) & \SI{XXX}{\milli\second} & \SI{XXX}{\milli\second} & \SI{XXX}{\milli\second} \\
+Semantic search (top-8, warm) & \SI{XXX}{\milli\second} & \SI{XXX}{\milli\second} & \SI{XXX}{\milli\second} \\
+\bottomrule
+\end{tabular}
+\caption{Median latency per pipeline stage on the synthetic corpus, JSON
+vector backend. Reproduce via \texttt{python bench/run.py -{}-scale N} on any
+machine; the harness fingerprints the hardware for cross-run comparability.}
+\label{tab:latency}
+\end{table}
+
+Three observations follow from the algorithmic structure of each stage, and
+should hold in the measured numbers. Ingest performs a single read of
+\texttt{records.jsonl}, an $O(|R_{\text{new}}|)$ dedup merge against the
+in-memory id map, and one write-then-rename; wall time is I/O-bound and grows
+approximately linearly with $N$. Work-graph construction is a single pass over
+all records (\S\ref{sec:workgraph}) with $O(1)$ per-record work modulo regex
+matching, again linear in $N$. Urgency triage is a full scan applying a fixed
+number of signal predicates per record with $O(|A|)$ substring checks over the
+configured action-word set $A$ (\S\ref{sec:urgency}); linear in $N \cdot |A|$.
+Warm semantic search under \texttt{JSONVectorStore} loads the entire
+persisted vector map on every call (\S\ref{sec:vector-stores}); the query is
+$O(N \cdot d)$ for embedding dimension $d = 384$. This last fact motivates
+the Qdrant backend and the crossover experiment in
+\S\ref{sec:eval-jsonvsqdrant}.
+
+\subsection{JSON versus Qdrant crossover}
+\label{sec:eval-jsonvsqdrant}
+
+The two vector backends serve identical queries with identical results (both
+persist L2-normalised float32 vectors under cosine distance,
+\S\ref{sec:vector-stores}) but different cost profiles.
+\texttt{JSONVectorStore} reads the whole vector map from disk on every query;
+\texttt{QdrantVectorStore} issues a single RPC to a Qdrant process (local
+Docker or remote) that maintains an HNSW index server-side. Table~\ref{tab:jsonvsqdrant}
+reports cold and warm top-$8$ latency for both backends at three corpus scales.
+``Cold'' is the first query after Store construction (encoder load, vector-map
+load or Qdrant connect); ``warm'' is the median of the subsequent queries.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lrrrrrr}
+\toprule
+ & \multicolumn{2}{c}{\textbf{$N{=}10^{3}$}} & \multicolumn{2}{c}{\textbf{$N{=}10^{4}$}} & \multicolumn{2}{c}{\textbf{$N{=}10^{5}$}} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7}
+\textbf{Backend} & cold & warm & cold & warm & cold & warm \\
+\midrule
+JSON   & \SI{XXX}{\milli\second} & \SI{XXX}{\milli\second} & \SI{XXX}{\milli\second} & \SI{XXX}{\milli\second} & \SI{XXX}{\milli\second} & \SI{XXX}{\milli\second} \\
+Qdrant & \SI{XXX}{\milli\second} & \SI{XXX}{\milli\second} & \SI{XXX}{\milli\second} & \SI{XXX}{\milli\second} & \SI{XXX}{\milli\second} & \SI{XXX}{\milli\second} \\
+\bottomrule
+\end{tabular}
+\caption{Top-8 semantic search latency, cold vs.\ warm, on JSON vs.\ Qdrant.
+Qdrant is expected to win at $\gtrsim 10^{5}$ records; below that, the whole-file
+load in JSON is faster than an RPC to a separate process. Choice of backend
+is a configuration flag (\texttt{qdrant.url} in \texttt{coviber.yaml} or
+\texttt{COVIBER\_QDRANT\_URL}); no application code changes.}
+\label{tab:jsonvsqdrant}
+\end{table}
+
+The expected shape of the crossover is: at $10^{3}$--$10^{4}$ records, JSON
+warm latency dominates because the whole-file load is cheap and there is no
+per-query network hop; at $10^{5}$ and beyond, the load-per-query cost of
+JSON grows linearly with corpus size while Qdrant's server-side ANN keeps
+query cost approximately constant in $N$ (logarithmic under HNSW). This
+matches the documentation in \texttt{vector\_stores.py}: JSON is
+``\emph{fine up to $\sim\!10^{5}$ records; past that the load-per-query cost
+dominates.}'' The crossover point in the measured column is the empirical
+answer to when a user should install the \texttt{[qdrant]} extra.
+
+\subsection{Work-graph extraction on ground truth}
+\label{sec:eval-workgraph}
+
+The demo corpus was constructed with a known ground truth so the deterministic
+graph extractor (\S\ref{sec:workgraph}) can be checked exactly. The corpus
+contains three projects (Falcon, Orbit, Atlas), four ticket references
+(\texttt{PR \#482}, \texttt{ATLAS-1290}, \texttt{PR \#77}, \texttt{ORBIT-908}),
+and seven distinct sender / recipient identities excluding the self-user
+\texttt{"you"} (Grace Hopper, Linus Vega, Margaret Chen, Ada Byron, plus the
+noise senders \texttt{acme-ci-bot}, \texttt{newsletter@acme.com},
+\texttt{security-alerts@acme.com}). Given the projects list
+$\{\text{Falcon}, \text{Orbit}, \text{Atlas}\}$ passed to
+\texttt{WorkGraph(known\_projects=...)} and the default ticket regex, extraction
+should recover all three populations exactly.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lrrrr}
+\toprule
+\textbf{Entity type} & \textbf{Ground truth} & \textbf{Extracted} & \textbf{Precision} & \textbf{Recall} \\
+\midrule
+Projects & 3 & 3 & 1.00 & 1.00 \\
+People   & 7 & 7 & 1.00 & 1.00 \\
+Tickets  & 4 & 4 & 1.00 & 1.00 \\
+\bottomrule
+\end{tabular}
+\caption{Work-graph extraction on the demo corpus. Precision and recall are
+$1.0$ by construction: the extractor is a pair of deterministic regexes plus
+a word-boundary project match (\S\ref{sec:workgraph}) and the demo corpus was
+authored to exercise them. This is a regression sanity check, not a claim
+about extraction quality on arbitrary natural-language streams; on unmarked
+corpora, project recall is bounded by the completeness of the caller's
+\texttt{known\_projects} list, and ticket precision by whether local
+identifier conventions match the shipped regex.}
+\label{tab:workgraph-truth}
+\end{table}
+
+The stronger claim the code supports is \emph{stability under normalisation}:
+\texttt{PR \#482}, \texttt{PR\#482}, and \texttt{PR  \#482} collapse to a single
+canonical ticket node, and \texttt{"Ada Byron"} / \texttt{"ada byron"} /
+\texttt{"ADA BYRON"} collapse to a single person node whose \texttt{display\_name}
+retains the best mixed-case form seen (\S\ref{sec:workgraph}, audit findings
+L4/\#11 and L4/\#14). This is exercised by the regression tests and is what
+makes the graph safe to rebuild by re-running \texttt{ingest} against a
+partially-rescraped corpus.
+
+\subsection{Persona-profile determinism}
+\label{sec:eval-persona-det}
+
+The \texttt{persona.learn(messages)} function is inference-free
+(\S\ref{sec:persona}): all statistics are counter aggregations and integer
+arithmetic over the input strings. This buys a determinism guarantee that a
+neural persona model cannot: for a fixed set of authored messages the learned
+\texttt{VoiceProfile} is a function of the multiset, not of the sequence, up to
+tie-breaking in ranked lists. We verify this on the three \texttt{from\_name =
+"you"} messages in the demo corpus (\S\ref{sec:synthetic-corpus}).
+
+\begin{proposition}[Permutation invariance of scalar profile statistics]
+\label{prop:persona-invariance}
+Let $M = \{m_1, \dots, m_k\}$ be a set of authored messages. For any two
+orderings $\sigma, \tau$ of $M$, the scalar fields of
+$\texttt{learn}(\sigma(M))$ and $\texttt{learn}(\tau(M))$ agree exactly:
+\begin{center}
+\texttt{n\_messages}, \texttt{avg\_words}, \texttt{formality},
+\texttt{emoji\_rate}, \texttt{question\_rate}, \texttt{exclaim\_rate}.
+\end{center}
+The ranked-list fields \texttt{top\_openers}, \texttt{top\_closers}, and
+\texttt{vocabulary} agree as \emph{multisets} of (item, count) pairs. Their
+ordering agrees whenever count ties are broken by a total order on items;
+under CPython's \texttt{collections.Counter.most\_common}, ties are broken by
+insertion order, so ordering of tied items depends on the input permutation.
+\end{proposition}
+\begin{proof}[Proof sketch]
+Each scalar field is a sum, mean, or clamped affine function of per-message
+statistics; sums commute. The ranked lists are the top-$k$ outputs of
+\texttt{Counter.most\_common}, and \texttt{Counter} accumulation is
+commutative. The only permutation-dependent step is
+\texttt{most\_common}'s stable secondary sort on insertion order among tied
+counts.
+\end{proof}
+
+Empirically, on the demo corpus's three authored messages the top opener
+(``\texttt{Hi}''), top closer (``\texttt{Thanks}''), and top twelve vocabulary
+items each have strict count leads, so the \texttt{system\_prompt} output —
+which reads only \texttt{top\_openers[0]}, \texttt{top\_closers[0]}, and
+\texttt{vocabulary[:12]} — is identical across all $3! = 6$ permutations of
+the input. On corpora where ties exist in these top slots, the caller can
+either accept the tie-break-by-insertion behaviour or post-sort ranked lists
+by a stable secondary key (the code currently exposes the raw counters so
+callers may do the latter without patching the library).
+
+\subsection{Reproducibility and release process}
+\label{sec:eval-repro}
+
+Every number in this section is regenerable from the shipped package. The
+benchmark harness (\texttt{bench/run.py}) prints its measurements in a
+plain-text table on \texttt{stdout} together with the exact command to reproduce
+them. Under GitHub issue \#48 (``Scale-N benchmark suite''), the harness writes
+its results to \texttt{bench/results/<git-sha>-<hardware-fingerprint>.json}, so
+that the numbers reported in this paper are traceable to a specific commit and
+a specific machine, and any downstream user can compare their run to the
+reference run at the same scale. The synthetic corpus is versioned inside the
+package (\texttt{coviber/loaders/demo.py}) and is deliberately small and
+fictional: none of the numbers in this section, and none of the algorithms
+they benchmark, has ever seen private data.

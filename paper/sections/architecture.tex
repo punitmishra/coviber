@@ -1,0 +1,178 @@
+% Verified: False
+% Refutation notes:
+%   The draft misstates the CLI surface. It writes: "The CLI (\texttt{coviber ingest / triage / recall / graph / voice / serve}, defined in \texttt{coviber/cli.py})". Checked against coviber/cli.py (build_parser, lines 121–145): the actual subcommands are `ingest`, `triage`, `query`, `graph`, `demo`, `loaders`, `serve`. There is no `recall` subcommand (that name is an MCP tool in mcp_server.py, not a CLI verb) and no `voice` subcommand (there is no CLI equivalent of the `voice_profile` MCP tool). The CLI also has `query`, `demo`, and `loaders` subcommands the draft omits. This is a straightforward factual error about a file the section explicitly references. Fix: either enumerate the real verbs (`coviber ingest / triage / query / graph / demo / loaders / serve`) or say something like "a set of one-shot verbs including \texttt{ingest}, \texttt{triage}, \texttt{query}, \texttt{graph}, and \texttt{serve}" without pretending `recall`/`voice` exist there. All other technical claims verified against source: pipeline.ingest matches Algorithm 1 line-for-line (get_loader→list→Store→upsert→all→WorkGraph(known_projects, you)→ingest→save_graph); 6 built-in loaders (demo/jsonl/mbox/imap/slackexport/webscrape) confirmed in loaders/__init__.py; `@register` decorator and `coviber.loaders` entry-point group confirmed; `Record.id`-keyed dedup with lock-guarded read-merge-rewrite and write-then-os.replace confirmed in store.upsert; `records.jsonl.bad` quarantine confirmed in _quarantine; four extras (`[search]`, `[scrape]`, `[qdrant]`, `[mcp]`) confirmed in pyproject.toml; JSONVectorStore vs QdrantVectorStore with `COVIBER_QDRANT_URL` env fallback confirmed in vector_stores.resolve; 7 MCP tools (recall, catch_me_up, who_is, project_status, graph_summary, voice_profile, refresh) all present as @mcp.tool() in mcp_server.py; per-call `_settings()` re-read confirmed in mcp_server._settings, and the "don't add a module-level settings cache" invariant is verbatim in ARCHITECTURE.md line 106; core stdlib-only claim holds (the only non-stdlib top-level core import is `mcp.server.fastmcp` in the [mcp]-gated mcp_server.py); "~10^5" JSON-store cutoff matches the vector_stores.py module docstring; inference-free persona confirmed (persona.py is pure statistics, no LLM calls). One minor caveat that does not itself warrant refutation: the draft's phrase "config-driven ticket regex" is technically true (WorkGraph.__init__ accepts `ticket_re=`), but Settings/pipeline.ingest do not currently thread a user-supplied regex through — only `known_projects` and `you` are threaded. Worth softening in prose but not a factual break.
+% Notes to assembler: Architecture figure: the section references figures/architecture.pdf via \\includegraphics. Two options for the assembler:\n\n  (a) Render the ARCHITECTURE.md ASCII sketch as a TikZ diagram. I recommend a simple three-column layout: a left stack of six loader boxes (email/IMAP, mbox, slack export, j
+
+\section{System}
+\label{sec:system}
+
+\subsection{Architecture overview}
+\label{sec:arch}
+
+CoViber is organized around a single architectural commitment: the only
+pluggable seam is the boundary at which context enters the system. Everything
+downstream --- deduplicated persistence, cross-source entity extraction,
+urgency triage, semantic recall, and the client surface --- operates on a
+common canonical schema and is deliberately source-agnostic. This section
+gives the top-down view; the four numbered subsections that follow
+(\S\ref{sec:records}--\S\ref{sec:persona}) formalize each stage in turn, and
+\S\ref{sec:mcp} covers the client surface.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.98\linewidth]{figures/architecture.pdf}
+\caption{CoViber architecture. Heterogeneous sources are normalized by
+per-platform \emph{Loaders} into a single \texttt{Record} stream. The
+loader-agnostic core then applies four stages --- content-hash dedup and
+persistence (\texttt{Store}), incremental entity extraction (\texttt{WorkGraph}),
+multi-signal urgency triage, and inference-free voice modelling --- writing
+three durable artefacts to disk: \texttt{records.jsonl}, a pluggable vector
+index (\texttt{embeddings.json} or a Qdrant collection), and
+\texttt{workgraph.json}. A CLI and an MCP stdio server share the same in-process
+core and expose the memory to any MCP-capable client. All state is local; no
+network egress is required for any core operation.}
+\label{fig:architecture}
+\end{figure}
+
+\paragraph{The single seam.}
+A CoViber \emph{Loader} is any object that yields \texttt{Record}s. The
+\texttt{Record} dataclass (\S\ref{sec:records}) is the one shape every loader
+produces; six built-ins ship in \texttt{coviber.loaders/} (\texttt{demo},
+\texttt{jsonl}, \texttt{mbox}, \texttt{imap}, \texttt{slackexport},
+\texttt{webscrape}), and third parties register additional loaders via a
+\texttt{@register} decorator or the \texttt{coviber.loaders} entry-point
+group.\footnote{See \texttt{coviber/loaders/base.py} and
+\texttt{coviber/loaders/\_\_init\_\_.py}. The dispatch is name-keyed:
+\texttt{get\_loader("myapp", cfg)} returns an instance regardless of whether the
+loader lives inside the package or in a third-party wheel.} No downstream
+module in \texttt{coviber/} branches on \texttt{record.source}; source-specific
+parsing is confined to the loader module that produced the record.
+
+\paragraph{Four core stages.}
+A single call to \texttt{pipeline.ingest(settings)}
+executes the loader-agnostic core as a linear sequence
+(Algorithm~\ref{alg:ingest}):
+\begin{enumerate}
+    \item \textbf{Dedup and persistence.} \texttt{Store.upsert} merges the
+    yielded records into \texttt{records.jsonl} keyed by the content-derived
+    \texttt{Record.id} (\S\ref{sec:records}). Writers serialize on an advisory
+    file lock (\texttt{.lock}) held across the read-merge-rewrite; readers stay
+    lock-free because every rewrite is atomic (write-then-\texttt{os.replace}).
+    Unparseable lines are quarantined to \texttt{records.jsonl.bad} rather than
+    silently dropped~\cite{TODO-crash-consistency}.
+    \item \textbf{Cross-source entity extraction.} \texttt{WorkGraph.ingest}
+    walks the full record stream and folds people, projects, channels, and
+    tickets into four bidirectionally-linked node tables using a
+    config-driven ticket regex and case-insensitive canonicalization
+    (\S\ref{sec:graph}). The result is persisted to \texttt{workgraph.json},
+    again via a write-then-rename.
+    \item \textbf{Urgency triage.} On demand --- typically from
+    \texttt{pipeline.build\_queue} or the \texttt{catch\_me\_up} MCP tool ---
+    the urgency scorer (\S\ref{sec:urgency}) applies a skip filter and a
+    weighted multi-signal sum $U(r) \in [0,14]$ over the records loaded from
+    disk, yielding a prioritized queue.
+    \item \textbf{Semantic recall.} Also on demand, \texttt{Store.search}
+    encodes a query and ranks records by cosine similarity against a
+    persisted vector index; when the \texttt{[search]} extra is absent, it
+    degrades to a keyword scorer over the same records
+    (\S\ref{sec:recall}).
+\end{enumerate}
+
+\begin{algorithm}[t]
+\caption{One ingest cycle (\texttt{coviber.pipeline.ingest}).}
+\label{alg:ingest}
+\begin{algorithmic}[1]
+\Require settings $S$ (loader name, config, data dir, graph priors)
+\State $L \gets \Call{GetLoader}{S.\text{loader}, S.\text{loader\_config}}$
+\State $R \gets \Call{list}{L.\text{load}()}$ \Comment{loader-agnostic downstream}
+\State $\Sigma \gets \Call{Store}{S.\text{data\_dir}, S.\text{qdrant}}$
+\State $n_{\text{new}} \gets \Sigma.\Call{upsert}{R}$
+    \Comment{lock-guarded read-merge-rewrite; dedup by \texttt{Record.id}}
+\State $R_{\text{all}} \gets \Sigma.\Call{all}{}$ \Comment{single re-read; feeds both graph and stats}
+\State $G \gets \Call{WorkGraph}{S.\text{known\_projects}, S.\text{you}}$
+\State $G.\Call{ingest}{R_{\text{all}}}$ \Comment{$O(1)$ amortized per record}
+\State $\Sigma.\Call{saveGraph}{G.\Call{toDict}{}}$
+\State \Return $\{n_{\text{new}}, |R_{\text{all}}|, G.\Call{summary}{}\}$
+\end{algorithmic}
+\end{algorithm}
+
+Note that triage and recall are \emph{not} part of the ingest cycle: they read
+the persisted store and graph, so they can be invoked without a re-load. The
+lock covers each writer's own read-merge-rewrite, not the whole ingest
+pipeline --- two concurrent ingests on the same data directory interleave
+safely at write boundaries but do not observe a transactional
+``all-of-mine-then-all-of-yours'' view. This is a considered choice: a
+whole-pipeline lock would push ingest latency up by the encoder cost, which
+dominates on cold vectors.
+
+\paragraph{Two persistence surfaces.}
+The core writes to two logical stores, both under a single
+\texttt{data\_dir}: (i)~\texttt{records.jsonl}, the append-optimized
+canonical corpus of deduped \texttt{Record}s, plus its quarantine sibling
+\texttt{records.jsonl.bad}; and (ii)~a pluggable vector index behind the
+\texttt{VectorStore} protocol
+(\texttt{coviber/vector\_stores.py}). Two backends implement the protocol:
+\texttt{JSONVectorStore} materializes the whole vector table into one
+\texttt{embeddings.json} file next to \texttt{records.jsonl} (zero
+dependencies, appropriate up to $\sim 10^5$ records), and
+\texttt{QdrantVectorStore} routes persistence and $k$-NN search to a Qdrant
+instance (\texttt{[qdrant]} extra; typically a local Docker container).
+Backend selection happens once at \texttt{Store} construction, keyed by an
+explicit \texttt{qdrant:} block or the \texttt{COVIBER\_QDRANT\_URL} env
+var; the search code path is identical regardless of backend. The
+\texttt{workgraph.json} artefact is a third on-disk file but is fully derived
+from \texttt{records.jsonl} and can be rebuilt at any time by re-running
+\texttt{ingest}. See \S\ref{sec:recall} for the model-tag invalidation
+protocol that keeps a persisted index consistent with the encoder in use.
+
+\paragraph{Two client surfaces, one core.}
+Both clients are thin wrappers over the same in-process modules
+(Figure~\ref{fig:architecture}). The CLI (\texttt{coviber ingest / triage /
+recall / graph / voice / serve}, defined in \texttt{coviber/cli.py}) is a
+one-shot interface for humans and shell pipelines. The MCP server
+(\texttt{coviber/mcp\_server.py}) is a long-running stdio process exposing
+seven tools --- \texttt{recall}, \texttt{catch\_me\_up}, \texttt{who\_is},
+\texttt{project\_status}, \texttt{graph\_summary}, \texttt{voice\_profile},
+and \texttt{refresh} --- to any MCP-capable client
+(\S\ref{sec:mcp})~\cite{TODO-mcp-spec}. Both routes go through
+\texttt{Settings.from\_dict} and share a single YAML/JSON config schema
+(\texttt{COVIBER\_CONFIG}), so an operator can migrate a session from
+interactive CLI use to an always-on Claude-Desktop integration without
+re-authoring configuration. The MCP server re-reads its settings on every
+tool call, so a config edit takes effect on the next call without a
+restart.\footnote{See the invariants note in
+\texttt{ARCHITECTURE.md}: a module-level settings cache would break this
+property and is explicitly disallowed.}
+
+\paragraph{Design commitments.}
+Four commitments shape the design and appear repeatedly in the sections that
+follow. They are stated once here so later formalizations can refer to them
+by name.
+\begin{description}
+    \item[Local-first.] Records, graph, and vectors live on disk under a
+    user-owned \texttt{data\_dir}; the MCP transport is stdio to a local
+    process. No network is required for any core operation. When Qdrant is
+    configured, data still resides where the operator points the URL --- by
+    default, a local Docker container.
+    \item[One seam.] New sources are added by writing a new \texttt{Loader},
+    not by changing core code. The invariant that ``no core module branches
+    on \texttt{record.source}'' is the operational form of this commitment.
+    \item[Graceful degradation.] The core has no non-stdlib runtime
+    dependency. Four opt-in extras
+    (\texttt{[search]}, \texttt{[scrape]}, \texttt{[qdrant]},
+    \texttt{[mcp]}) each degrade cleanly when absent: embedding search
+    falls back to keyword scoring, HTML scraping errors with an
+    actionable message, the vector index defaults to
+    \texttt{JSONVectorStore}, and the CLI still runs without
+    \texttt{mcp}.
+    \item[Inference-free voice.] The persona model
+    (\S\ref{sec:persona}) is pure statistics --- no model call is made
+    to draft in the user's style. Voice modelling is therefore fast,
+    private, and deterministic on the local corpus.
+\end{description}
+
+The remainder of Section~\ref{sec:system} formalizes each stage. Sections
+\S\ref{sec:records}--\S\ref{sec:recall} follow the pipeline order of
+Algorithm~\ref{alg:ingest} (record schema, loader interface, work graph,
+urgency triage, semantic recall), and \S\ref{sec:persona}--\S\ref{sec:mcp}
+cover the persona model and the MCP client surface.

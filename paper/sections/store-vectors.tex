@@ -1,0 +1,274 @@
+% Verified: False
+% Refutation notes:
+%   Two claims are contradicted by the shipped code:
+%   
+%   (1) HARD REFUTATION — Protocol method count. The draft states in §3.7.2 that the VectorStore protocol is "intentionally small — six methods". The actual Protocol in coviber/vector_stores.py (lines 25-45) defines SEVEN methods: known_ids, upsert, delete, search, model, rebind, wipe. The section's own Listing~\ref{lst:vs-proto} also enumerates all seven. The prose "six methods" contradicts both the code and the listing shown in the same section. Fix: change "six methods" to "seven methods".
+%   
+%   (2) Softer inaccuracy — model-change invalidation for JSONVectorStore. The draft claims "Every backend persists its embedder tag ... so that a model change is detected on the first call after startup and triggers wipe(), forcing a full re-encode." This is only true for QdrantVectorStore (vector_stores.py lines 224-232 explicitly call self.wipe() in _reconcile_model_tag on mismatch). JSONVectorStore does NOT call wipe() on model mismatch — its _load() (lines 76-78) simply returns an empty dict on mismatch, and the next _persist() overwrites embeddings.json with the new tag. The full re-encode does happen, but via lazy cache invalidation rather than a wipe() call. Fix: describe the invalidation mechanism more generically ("triggers a lazy invalidation / rebuild" or "invalidates the cached vectors") or split the sentence between the two backends.
+%   
+%   Minor notational issue (not sufficient alone to refute, but flagging): the keyword score's denominator is documented as log(2 + |r.blob|) where |r.blob| is ambiguous; the code uses log(2 + len(blob.split())), i.e. word count over the concatenated subject+text+from_name string. If |r.blob| is intended as "length in words" this is fine; a footnote making that explicit would remove the ambiguity.
+% Notes to assembler: Section uses two forward references: \\ref{sec:design-principles} (for the local-first stance and the zero-dependency-by-default principle) and \\S\\ref{sec:record-store} etc. within-section labels. Confirm the design-principles section is labeled sec:design-principles or adjust.\n\nPreamble require
+
+\subsection{Persistence and semantic search}
+\label{sec:persistence-search}
+
+CoViber's persistence layer is designed around three assumptions that
+follow from its local-first stance (\S\ref{sec:design-principles}):
+records must survive process crashes with no torn state; concurrent
+writers (a long-running MCP server and an on-demand CLI \texttt{ingest})
+must serialize without a database daemon; and the semantic-search index
+must be pluggable so a user can start on a zero-dependency JSON file and
+migrate to Qdrant once the corpus grows past what fits comfortably in
+memory. This section describes the record store
+(\S\ref{sec:record-store}), the pluggable vector-store abstraction and
+its two shipped backends (\S\ref{sec:vector-stores}), the delta-encoding
+invariant that keeps the warm search path $O(\Delta)$
+(\S\ref{sec:delta-invariant}), and the keyword-scoring fallback that
+preserves usable behaviour when the optional embedding extra is absent
+(\S\ref{sec:keyword-fallback}).
+
+\subsubsection{The record store}
+\label{sec:record-store}
+
+Records are persisted as one JSON object per line in
+\texttt{<data\_dir>/records.jsonl}. Each ingestion cycle is an
+atomic\hyp{}rewrite: \texttt{Store.upsert} reads the full file, merges
+the new records into a dict keyed by \texttt{Record.id}
+(the content-derived MD5 hash minted in
+\texttt{Record.\_\_post\_init\_\_}, so two loaders that produce the same
+$(\texttt{text},\texttt{subject},\texttt{from\_name},\texttt{source})$
+tuple deduplicate naturally), rewrites the merged set to a temporary
+file, and finally invokes \texttt{os.replace} to swap it into place.
+The temporary filename is tagged with the writer's PID and a random
+suffix (\texttt{records.jsonl.tmp.\{pid\}.\{uuid\}}), so two writers
+that somehow bypass the advisory lock — a future bulk-import helper, a
+platform with neither \texttt{fcntl} nor \texttt{msvcrt} — cannot
+collide on a shared temporary path.
+
+\paragraph{Advisory lock.}
+The read–merge–write cycle is enclosed in an advisory file lock on
+\texttt{<data\_dir>/.lock}, acquired via \texttt{fcntl.flock} on POSIX
+and \texttt{msvcrt.locking} on Windows. The lock deliberately covers
+the read as well as the write: were the lock scoped only around the
+final rename, two concurrent writers could each read the pre-merge
+file, each merge their disjoint updates, and the last writer's rename
+would silently overwrite the first writer's contribution. Readers do
+not take the lock at all — the atomic \texttt{os.replace} in
+\texttt{upsert} already guarantees that a reader observes either the
+pre-write or post-write file, never a torn one. This asymmetry —
+writers serialize, readers proceed lock-free — is deliberate: the MCP
+tools (\texttt{recall}, \texttt{catch\_me\_up}, \texttt{who\_is}) run
+on the hot path of an LLM turn and must not block on unrelated
+ingestion. On platforms exposing neither \texttt{fcntl} nor
+\texttt{msvcrt}, the context manager degrades to a no-op; single-process
+correctness is preserved, only the multi-writer guarantee is lost, and
+this is documented at the call site.
+
+\paragraph{Corrupt-line quarantine.}
+For a memory product, silent data loss is the worst failure mode. When
+\texttt{\_read\_all} encounters a line that fails either
+\texttt{json.loads} or \texttt{Record.from\_dict}, it does not raise
+(which would brick every subsequent \texttt{upsert}) and it does not
+drop the line (which would erase evidence on the next rewrite).
+Instead the raw line is appended verbatim to
+\texttt{records.jsonl.bad} and a warning is emitted to \texttt{stderr}
+with the file and line number. On the next \texttt{upsert} the
+quarantined line is thus present in the sidecar but absent from
+\texttt{records.jsonl}, so the corpus continues to grow while the
+operator has a durable record of every parsing failure.
+
+\paragraph{Forward-compatible schema drops.}
+\texttt{Record.from\_dict} tolerates unknown keys — an older coviber
+reading a store written by a newer version does not crash. But the
+first time a given unknown key is observed in a process,
+\texttt{Record.from\_dict} emits a \texttt{RuntimeWarning} identifying
+the dropped field, so an operator running an accidental downgrade sees
+that the next \texttt{upsert} rewrite will lose those fields. Per-key
+one-shot deduplication prevents an $N$-record store from producing $N$
+identical warnings.
+
+\subsubsection{Pluggable vector stores}
+\label{sec:vector-stores}
+
+Semantic search is orthogonal to record persistence: the same
+records.jsonl can be indexed by any backend that satisfies the
+\texttt{VectorStore} protocol (Listing~\ref{lst:vs-proto}). The
+protocol is intentionally small — six methods — because it is the
+seam between coviber's zero-dependency default path and every future
+vector-database integration.
+
+\begin{lstlisting}[float,caption={The VectorStore protocol
+(\texttt{coviber/vector\_stores.py}).},label={lst:vs-proto},language=Python,basicstyle=\small\ttfamily]
+class VectorStore(Protocol):
+    def known_ids(self) -> set[str]: ...
+    def upsert(self, id_vecs: list[tuple[str, list[float]]]) -> None: ...
+    def delete(self, ids: Iterable[str]) -> None: ...
+    def search(self, query_vec: list[float],
+               live_ids: set[str], limit: int
+               ) -> list[tuple[float, str]]: ...
+    def model(self) -> str: ...
+    def rebind(self, model: str) -> None: ...
+    def wipe(self) -> None: ...
+\end{lstlisting}
+
+The \texttt{model()} accessor is load-bearing: two vectors produced by
+different sentence encoders inhabit different metric spaces and cannot
+be meaningfully mixed. Every backend persists its embedder tag
+(\texttt{all-MiniLM-L6-v2} in the shipped default) so that a model
+change is detected on the first call after startup and triggers
+\texttt{wipe()}, forcing a full re-encode. \texttt{search} takes the
+set of currently-live record ids and filters against it inside the
+backend, so a record removed from \texttt{records.jsonl} but not yet
+purged from the index cannot leak into results during a partial
+reconciliation.
+
+\paragraph{JSONVectorStore --- the default.}
+The zero-dependency backend stores vectors in a single file
+\texttt{embeddings.json} alongside \texttt{records.jsonl}, with
+schema $\{\texttt{model}: \tau,\, \texttt{vectors}: \{r_i \mapsto \mathbf{v}_i\}\}$.
+It has no in-process cache: every call re-reads the file, matching
+pre-v0.3 semantics and letting an external process edit the index
+without a coviber restart. Vectors are coerced to
+\texttt{float32}-precision Python floats before serialization; this
+roughly halves on-disk width relative to \texttt{float64} with no
+meaningful precision loss for a \texttt{float32}-native encoder. Writes
+use the same PID\hyp{}and\hyp{}uuid tagged temporary path idiom as the
+record store, so a lock-free \texttt{search()} on the read path cannot
+race a \texttt{upsert()} into a torn file. A cache whose model tag
+does not match the current tag is discarded silently and rebuilt
+lazily by the next search — the same treatment as an unreadable or
+non-dict cache file. The JSON backend is documented to be appropriate
+up to $\sim 10^{5}$ records; past that, the whole-file read on every
+call becomes the dominant cost.
+
+\paragraph{QdrantVectorStore --- the ANN escape hatch.}
+Beyond that scale the shipped Qdrant\cite{TODO-qdrant} backend
+delegates persistence and search to a server-side ANN index. It is
+opt-in behind the \texttt{[qdrant]} extra, so the default install
+still ships with a hard dependency count of zero (see
+\S\ref{sec:design-principles}). Two implementation choices are worth
+noting. First, coviber's \texttt{Record.id} is exactly a 128-bit MD5
+digest, which parses into a UUID with no loss of bits and gives a
+stable, invertible mapping from record id to Qdrant point id — no
+external id-to-uuid table is required. Second, the model tag is
+stored in a small sidecar \texttt{qdrant.meta.json} on the local
+filesystem rather than in Qdrant collection metadata, so
+model-invalidation logic is identical to the JSON backend and does not
+depend on Qdrant client capabilities that may differ across versions.
+
+\paragraph{Resolver and the local-first invariant.}
+The \texttt{resolve()} function is the single place in the codebase
+that maps configuration to a backend instance. Its precedence is
+(1)~an explicit \texttt{qdrant:} block in \texttt{coviber.yaml}, then
+(2)~the \texttt{COVIBER\_QDRANT\_URL} environment variable, then
+(3)~\texttt{JSONVectorStore}. When a Qdrant URL is configured but its
+host does not textually match loopback (\texttt{localhost},
+\texttt{127.x.x.x}, \texttt{::1}), the resolver emits a
+\texttt{stderr} warning that vectors will be transmitted off-device.
+This is intentionally non-fatal — a remote Qdrant is a legitimate
+power-user configuration — but must be visible: a copy-pasted managed
+cluster URL should not silently violate the local-first invariant.
+Correspondingly, a Qdrant URL that fails on connect raises up to the
+caller rather than falling back to JSON, because a silent fallback
+would mask real configuration drift for a system whose sole purpose is
+durable memory.
+
+\subsubsection{The delta-encoding invariant}
+\label{sec:delta-invariant}
+
+Semantic search proceeds against the union of the record store and the
+vector store, but re-encoding the whole corpus on every query would
+make the warm path scale with corpus size $N$ rather than with the
+number of newly ingested records. Algorithm~\ref{alg:delta} states the
+invariant coviber's \texttt{Store.\_embedding\_search} enforces on
+every call.
+
+\begin{algorithm}[t]
+\caption{Delta-reconcile-and-search (\texttt{Store.\_embedding\_search}).}
+\label{alg:delta}
+\begin{algorithmic}[1]
+\Require query string $q$, record set $\mathcal{R}$, vector store $\mathcal{V}$, encoder $E$, top-$k$
+\State $L \gets \{r.\mathrm{id} : r \in \mathcal{R}\}$ \Comment{live ids}
+\State $K \gets \mathcal{V}.\Call{known\_ids}{}$
+\State $S \gets K \setminus L$ \Comment{stale: indexed but no longer in store}
+\State $M \gets \{r \in \mathcal{R} : r.\mathrm{id} \notin K\}$ \Comment{missing: in store, unindexed}
+\If{$M \neq \emptyset$}
+    \State $\mathbf{V} \gets E.\Call{encode}{\{r.\mathrm{subject} \parallel r.\mathrm{text} : r \in M\}}$
+    \State $\mathcal{V}.\Call{upsert}{\{(r.\mathrm{id}, \mathrm{f32}(\mathbf{v}_r)) : r \in M\}}$
+\EndIf
+\If{$S \neq \emptyset$} \State $\mathcal{V}.\Call{delete}{S}$ \EndIf
+\State $\mathbf{q} \gets E.\Call{encode}{q}$
+\State \Return $\mathcal{V}.\Call{search}{\mathbf{q},\ L,\ \max(2k, 16)}$ truncated to $k$
+\end{algorithmic}
+\end{algorithm}
+
+\paragraph{Complexity.}
+Let $N = |\mathcal{R}|$ and $\Delta = |M| + |S|$ be the number of
+records changed since the last search. The set operations
+$K \setminus L$ and the membership filter for $M$ are both $O(N)$ in
+Python's hashed set implementation, but the encoder call — the
+dominant cost — runs on exactly $|M|$ inputs. On a warm store where
+ingestion has added $|M|$ records and removed $|S|$, the reconciliation
+step is $O(\Delta)$ in the expensive dimension (embedder invocation and
+on-disk vector I/O). On the cold path where $K = \emptyset$ we
+recover the trivial $O(N)$ full re-encode. The search step itself is
+$O(N)$ for \texttt{JSONVectorStore} (dot product against every live
+vector) and asymptotically sublinear for
+\texttt{QdrantVectorStore} (server-side HNSW\cite{TODO-hnsw}); this
+motivates the $10^{5}$-record migration threshold.
+
+\paragraph{Over-fetch and live-id filtering.}
+The final \texttt{search} call over-fetches to $\max(2k, 16)$ hits and
+truncates to $k$ after mapping ids back to \texttt{Record} objects.
+This absorbs two edge cases without additional lock discipline:
+a record that was deleted from \texttt{records.jsonl} between the
+\texttt{known\_ids()} call and the search cannot inflate the result
+above $k$ live entries, and a hit whose id no longer maps to a live
+\texttt{Record} is dropped by the reverse-lookup filter in
+\texttt{\_embedding\_search}.
+
+\paragraph{Why not re-encode on ingest?}
+An alternative design would encode inside \texttt{upsert} and skip
+reconciliation on the search path. Coviber deliberately does not do
+this: the embedder is an optional dependency, so \texttt{upsert} must
+work when \texttt{sentence-transformers} is not installed;
+\texttt{ingest} is called from environments (CI, cron) where a
+1--2\,GB model download is undesirable; and encoding on the search
+path lets a user install the \texttt{[search]} extra later without
+re-ingesting. The delta invariant makes deferred encoding cheap
+enough that the design cost is paid only on the first search after
+each ingest.
+
+\subsubsection{The keyword fallback}
+\label{sec:keyword-fallback}
+
+When \texttt{sentence-transformers} is not installed —
+\texttt{\_get\_embedder} raises \texttt{ImportError} —
+\texttt{Store.search} catches it \emph{silently} and falls back to the
+keyword-scoring path:
+\[
+\mathrm{score}(r, q) = \frac{\sum_{t \in q} \mathrm{count}(t,\, r.\text{subject} \parallel r.\text{text} \parallel r.\text{from\_name})}{\log\bigl(2 + |r.\text{blob}|\bigr)},
+\]
+records with zero matching terms are pruned, and the remainder are
+returned sorted by descending score. This is a term-frequency scoring
+scheme — deliberately not TF--IDF, since an IDF pass would either
+require another persisted index or an $O(N)$ scan on every query
+where the embedding path pays only $O(\Delta)$. The logarithmic
+length normalization prevents very long records from dominating on
+raw term counts alone.
+
+Two operationally meaningful details distinguish this fallback from a
+naive downgrade. First, the \texttt{ImportError} branch is silent
+because it represents an expected configuration; the
+\texttt{last\_search\_backend} attribute records
+\texttt{"keyword"} so callers (and MCP tools) can report the actual
+backend to the user. Second, an unexpected exception during embedding
+search — CUDA OOM, HuggingFace-hub transient failure on first model
+download, a torn embedding cache, an unreachable Qdrant — is
+\emph{surfaced} to \texttt{stderr} and via a \texttt{RuntimeWarning},
+even though the same keyword fallback is invoked. This lets an
+operator distinguish ``extras missing'' (silent, expected) from
+``extras installed but broken'' (loud, diagnostic), a distinction that
+matters when a search result set suddenly looks worse without a
+corresponding configuration change.
+

@@ -1,0 +1,131 @@
+% Verified: True
+% Notes to assembler: Preamble deps: algorithm/algorithmicx (or algpseudocode), booktabs (for the schema table), siunitx (for the placeholder), amsmath, amssymb. No figure files needed. Cross-refs used and expected to resolve elsewhere: sec:vector-store, sec:record, sec:urgency, sec:pipeline, sec:eval, sec:audit, sec:mcp
+
+\section{The Cross-Source WorkGraph}
+\label{sec:workgraph}
+
+The WorkGraph is CoViber's structural memory: a heterogeneous entity graph induced from the record stream that unifies people, projects, channels, and tickets scattered across loaders. Where the vector index (\S\ref{sec:vector-store}) supports lexical and semantic recall over individual records, the WorkGraph answers relational queries — \emph{who} works with whom, \emph{which} projects a channel touches, \emph{which} tickets a person has been active on — that no per-record embedding can serve directly. It is populated purely from the fields of the canonical \texttt{Record} schema (\S\ref{sec:record}); no loader-specific logic reaches into \texttt{workgraph.py}.
+
+\subsection{Definitions}
+\label{sec:workgraph-defs}
+
+Let $\mathcal{R}$ be the deduplicated record store and let $\mathcal{P}_{\text{known}}$ be an operator-supplied set of project names (config-driven; empty is legal, in which case the projects partition is empty). Let $Y$ be the operator's own identity (the \texttt{you} setting), matched case-insensitively.
+
+The WorkGraph is a tuple $G = (V_{\mathrm{peo}}, V_{\mathrm{prj}}, V_{\mathrm{ch}}, V_{\mathrm{tk}}, E)$ where the four node partitions are:
+\begin{itemize}
+  \setlength\itemsep{0.15em}
+  \item $V_{\mathrm{peo}}$: distinct persons observed across all records, keyed by their case-folded name.
+  \item $V_{\mathrm{prj}}$: elements of $\mathcal{P}_{\text{known}}$ that appeared in at least one record.
+  \item $V_{\mathrm{ch}}$: distinct non-empty values of the \texttt{channel} field.
+  \item $V_{\mathrm{tk}}$: distinct ticket / PR / issue identifiers extracted from record text and URL.
+\end{itemize}
+Edges are induced by co-occurrence within a record. Formally, for each record $r \in \mathcal{R}$ let $\mathrm{peo}(r), \mathrm{prj}(r), \mathrm{ch}(r), \mathrm{tk}(r)$ denote the entities extracted from $r$ (defined operationally in \S\ref{sec:workgraph-alg}). Then $E$ contains an undirected edge between every pair drawn from $\mathrm{peo}(r) \cup \mathrm{prj}(r) \cup \mathrm{ch}(r) \cup \mathrm{tk}(r)$ that crosses partitions, except that no edges are induced \emph{within} the tickets partition or \emph{within} the channels partition (mirroring the adjacency-set layout in \texttt{workgraph.py}). Each node additionally carries scalar attributes: an interaction count (people only), a mention count (projects, channels, tickets), a \texttt{last\_seen} timestamp (people only), a \texttt{display\_name} (people only), and the set of platforms it has appeared on (people only). The precise adjacency-set schema per partition is:
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+partition & adjacency sets & scalars \\
+\midrule
+people    & platforms, projects, channels & interaction\_count, last\_seen, display\_name \\
+projects  & people, channels, tickets     & mentions \\
+channels  & people, projects              & mentions \\
+tickets   & people, projects              & mentions \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The graph is intentionally undirected. Recipient / sender asymmetry, thread role, and reply direction are already carried on the underlying \texttt{Record} and consumed by the urgency stage (\S\ref{sec:urgency}); duplicating them as edge attributes here would double the storage cost of the graph for a signal the triage layer already owns.
+
+\subsection{Entity extraction}
+\label{sec:workgraph-alg}
+
+Algorithm~\ref{alg:workgraph-ingest} gives the per-record extraction and mutation step, applied by \texttt{WorkGraph.\_ingest\_one} to each $r \in \mathcal{R}$ in a single pass.
+
+\begin{algorithm}[t]
+\caption{WorkGraph ingest: single record}
+\label{alg:workgraph-ingest}
+\begin{algorithmic}[1]
+\Require record $r$; known projects $\mathcal{P}_{\text{known}}$ (pre-compiled to word-boundary patterns); ticket regex $T$; identity $Y$
+\Ensure in-place mutation of $V_{\mathrm{peo}}, V_{\mathrm{prj}}, V_{\mathrm{ch}}, V_{\mathrm{tk}}$
+\State $\mathit{blob} \gets r.\mathrm{subject} \Vert \text{`` ''} \Vert r.\mathrm{text}$
+\State $\mathit{blob}_\ell \gets \mathrm{lower}(\mathit{blob})$;\ \ $y \gets \mathrm{lower}(Y)$
+\Statex \Comment{Person extraction}
+\State $S \gets \{r.\mathrm{from\_name}, r.\mathrm{recipient}\} \setminus \{\varepsilon\}$ \Comment{drop empty strings}
+\State $S \gets S \cup \{m \mid m \in \textsc{MentionRe}.\mathrm{findall}(r.\mathrm{text})\}$
+\State $\mathit{peo} \gets \emptyset$; \ $\mathit{display} \gets \{\}$ \Comment{lowercase key $\to$ best display form}
+\ForAll{$p \in S$}
+  \State $k \gets \mathrm{lower}(p)$
+  \If{$k = y$} \textbf{continue} \EndIf
+  \If{$k \notin \mathit{display}$ \textbf{or} ($\mathit{display}[k] = k$ \textbf{and} $p \neq k$)}
+    \State $\mathit{display}[k] \gets p$
+  \EndIf
+  \State $\mathit{peo} \gets \mathit{peo} \cup \{k\}$
+\EndFor
+\Statex \Comment{Project matching (pre-compiled, word-boundary)}
+\State $\mathit{prj} \gets \{\, p : (p, \pi) \in \Pi \ \land\ \pi.\mathrm{search}(\mathit{blob}_\ell) \,\}$
+\Statex \Comment{Channel}
+\State $\mathit{ch} \gets \{r.\mathrm{channel}\}$ if $r.\mathrm{channel} \neq \varepsilon$ else $\emptyset$
+\Statex \Comment{Ticket extraction and canonicalization}
+\State $M \gets T.\mathrm{findall}(\mathit{blob} \Vert \text{`` ''} \Vert r.\mathrm{url})$
+\State $\mathit{tk} \gets \{\, \mathrm{sub}(\mathtt{r"PR\textbackslash s*\#\textbackslash s*"},\ \mathtt{"PR\ \#"},\ m)\ :\ m \in M\, \}$
+\Statex \Comment{Node mutation}
+\ForAll{$k \in \mathit{peo}$}
+  \State update $V_{\mathrm{peo}}[k]$: refresh \texttt{display\_name} if new form is better; $\mathrm{platforms} \gets \mathrm{platforms} \cup \{r.\mathrm{source}\}$;
+  \Statex\hspace{2em}$\mathrm{projects} \gets \mathrm{projects} \cup \mathit{prj}$;\ \ $\mathrm{channels} \gets \mathrm{channels} \cup \mathit{ch}$;
+  \Statex\hspace{2em}$\mathrm{interaction\_count} \mathrel{+}= 1$;\ \ update $\mathrm{last\_seen}$ if $r.\mathrm{ts}$ is ISO
+\EndFor
+\ForAll{$p \in \mathit{prj}$}\ update $V_{\mathrm{prj}}[p]$: $\mathrm{people} \cup \mathit{peo}$, $\mathrm{channels} \cup \mathit{ch}$, $\mathrm{tickets} \cup \mathit{tk}$, $\mathrm{mentions}\mathrel{+}=1$ \EndFor
+\ForAll{$c \in \mathit{ch}$}\ update $V_{\mathrm{ch}}[c]$: $\mathrm{people} \cup \mathit{peo}$, $\mathrm{projects} \cup \mathit{prj}$, $\mathrm{mentions}\mathrel{+}=1$ \EndFor
+\ForAll{$t \in \mathit{tk}$}\ update $V_{\mathrm{tk}}[t]$: $\mathrm{people} \cup \mathit{peo}$, $\mathrm{projects} \cup \mathit{prj}$, $\mathrm{mentions}\mathrel{+}=1$ \EndFor
+\end{algorithmic}
+\end{algorithm}
+
+Four extractors deserve individual comment because each fixes a class of failure the naive implementation exhibited in earlier revisions of the system.
+
+\paragraph{Person extraction (lines 3--12).}
+The candidate set is the union of the record's \texttt{from\_name}, its \texttt{recipient}, and every \texttt{@}-handle extracted from the body by the mention regex \texttt{MentionRe}:
+\[
+\mathtt{(?<![\backslash w.])@([A\text{-}Za\text{-}z0\text{-}9\_](?:[A\text{-}Za\text{-}z0\text{-}9\_.\text{-}]*[A\text{-}Za\text{-}z0\text{-}9\_])?)}
+\]
+The negative lookbehind \texttt{(?<![\textbackslash w.])} rejects the local-part-plus-\texttt{@} prefix of an email address (so \texttt{alice@example.com} does not spuriously mint an entity called \emph{example}), and the trailing character class forbids a handle ending in \texttt{.} or \texttt{-}, so sentence-final \texttt{@ada.} yields \texttt{ada} rather than \texttt{ada.}.
+
+Person node keys are case-folded so \texttt{"Ada Byron"} (from an email header) and \texttt{"ada byron"} (from a Slack export) collapse to one node. The pre-fold display form is retained on the node as \texttt{display\_name} under a first-good-form-wins rule: a mixed-case form replaces a lowercase-only placeholder, but a subsequent all-uppercase form does not overwrite an earlier mixed-case one. The operator's own identity $Y$ is filtered out at extraction time to prevent the graph collapsing into a hub-and-spoke topology centred on the user (every co-occurrence edge would otherwise touch $Y$). The current implementation does \emph{not} attempt to reconcile \texttt{"Ada Byron"} with the mention handle \texttt{@ada}; alias resolution would require an operator-supplied handle table and is deferred to future work (\S\ref{sec:future-work}).
+
+\paragraph{Project matching (line 13).}
+For each $p \in \mathcal{P}_{\text{known}}$ the constructor compiles the pattern $\pi_p = \mathtt{re.compile(rf"\textbackslash b\{re.escape(p.lower())\}\textbackslash b")}$ once, and $r$ is matched against the case-folded blob. Two design choices are worth calling out.
+
+First, \emph{word-boundary rather than substring}. An earlier revision used a plain \texttt{in} test on the lowercase blob, which caused short project names to produce large numbers of false-positive edges: \texttt{"AI"} matched \emph{email}, \emph{rail}, \emph{tail}; \texttt{"Go"} matched \emph{going}, \emph{ago}, \emph{cargo}. Word-boundary anchoring resolves this at the cost of missing intentional CamelCase compounds like \texttt{"CoViberAI"}, which we judge acceptable: operators who need such matches can simply add the compound to $\mathcal{P}_{\text{known}}$.
+
+Second, \emph{pre-compilation}. The alternative — recompiling the $|\mathcal{P}_{\text{known}}|$ patterns per record — turned regex compilation into a first-order cost at $|\mathcal{R}| = 10^5$ in early profiling. \texttt{re.escape} ensures that operational project names containing regex metacharacters (\texttt{"C++"}, \texttt{".NET"}, \texttt{"F\#"}) are treated as literals rather than as patterns.
+
+\paragraph{Ticket extraction (lines 14--15).}
+The default ticket pattern is
+\[
+\mathtt{(\backslash b[A\text{-}Z][A\text{-}Z0\text{-}9]+\text{-}\backslash d+\backslash b\ |\ \backslash bPR\backslash s*\#\backslash d+\backslash b\ |\ (?<![\backslash w\#])\#\backslash d\{3,\}\backslash b)}
+\]
+which admits three families: uppercase project-prefixed tickets (\texttt{"PROJ-123"}, \texttt{"AB1-42"}), pull-request references with optional whitespace between \texttt{"PR"} and \texttt{"\#"} (\texttt{"PR \#12"}, \texttt{"PR\#12"}), and bare-hash issue numbers with at least three digits (\texttt{"\#4567"}). The 3-digit minimum on the bare-hash branch is deliberate: it filters out ordinal fragments (\texttt{"\#1"}, \texttt{"\#42"}) that appear in list markup and casual prose without meaning a ticket, at the cost of missing short issue IDs early in a project. The lookbehind \texttt{(?<![\textbackslash w\#])} rejects both word-internal hashes and doubled hashes such as those found in Markdown H2 headers. The pattern is applied to \texttt{blob $\Vert$ url}, so PR references that appear only as a link in \texttt{r.url} are still captured.
+
+Every match is passed through \texttt{re.sub(r"PR\textbackslash s*\#\textbackslash s*", "PR \#", m)}, canonicalizing the whitespace-permissive branch to a single form. This prevents \texttt{"PR \#482"}, \texttt{"PR\#482"}, and \texttt{"PR  \#482"} from becoming three distinct nodes when the same PR is re-scraped through different loaders — a duplication bug the canonicalization step exists to close.
+
+\paragraph{Channels (line 16).}
+Channels are a passthrough of the \texttt{Record.channel} field. Loaders normalize their platform-native container concept into this field (a Slack channel name, a mail folder, a GitHub repository, a chat DM identifier), so the WorkGraph does not need to know which loader produced the record.
+
+\subsection{Complexity and current re-build model}
+\label{sec:workgraph-complexity}
+
+Per-record extraction is $O(1)$ in $|\mathcal{R}|$: the person and mention regexes scan a bounded record; project matching scans the blob once per known project ($O(|\mathcal{P}_{\text{known}}|)$, with $|\mathcal{P}_{\text{known}}|$ typically $\leq 50$); ticket extraction is one linear scan; set updates are amortized $O(1)$ against Python's hash-set primitives. Full-corpus ingest is therefore $\Theta(|\mathcal{R}|)$ with a small constant.
+
+The current pipeline (\texttt{pipeline.ingest}, \S\ref{sec:pipeline}) rebuilds the graph from scratch on every ingest cycle: after \texttt{Store.upsert}, it reads the full deduplicated corpus back with \texttt{store.all()} and calls \texttt{WorkGraph.ingest(all\_records)}. This is deliberate under the current design point, where $|\mathcal{R}| = 10^4$--$10^5$ and a full rebuild completes in $\approx\SI{XXX}{\milli\second}$ on the reference machine (\S\ref{sec:eval}); it also elides the correctness question of how to \emph{remove} edges when a record is superseded by a re-scrape with corrected metadata, since re-scrapes never mutate old edges in a rebuild.
+
+For target deployments in the $|\mathcal{R}| > 10^6$ regime this becomes the dominant per-cycle cost. An incremental variant that (i) processes only the new records returned by \texttt{Store.upsert} and (ii) reference-counts edges so re-scrapes can decrement is tracked as issue \cite{TODO-issue-18} and briefly discussed in \S\ref{sec:future-work}.
+
+\subsection{Serialization and query surface}
+\label{sec:workgraph-queries}
+
+\texttt{WorkGraph.to\_dict} materializes the four partitions as JSON-friendly nested dictionaries: each adjacency \emph{set} is sorted for deterministic output (so the persisted graph diffs cleanly across ingest runs, which matters for the audit-log design of \S\ref{sec:audit}). Two query helpers are exposed directly on the class:
+\begin{itemize}
+  \setlength\itemsep{0.15em}
+  \item \texttt{person(name)} and \texttt{project(name)} return the serialized node for a single entity, used by the MCP tools \texttt{who\_is} and \texttt{project\_status} (\S\ref{sec:mcp}).
+  \item \texttt{summary()} returns partition sizes, the top-10 people by interaction count, and the sorted project list; this backs the \texttt{graph\_summary} MCP tool and is what \texttt{pipeline.ingest} returns to its caller for status reporting.
+\end{itemize}
+Multi-hop queries (``which projects does person $X$ share with person $Y$?'', ``which tickets on project $P$ has person $X$ touched?'') are answered by set intersection over the adjacency fields, again in $O(1)$ per adjacency lookup and $O(|V|)$ in the worst case; no formal graph traversal library is used or needed at the current scale.
+

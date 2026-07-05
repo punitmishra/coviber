@@ -1,0 +1,146 @@
+% Verified: False
+% Refutation notes:
+%   Two factual errors misrepresent what the shipped code does:
+%   
+%   (1) TUPLE ARITY IS WRONG. The draft states `V(M)` is an "8-tuple" but the equation itself lists **nine** components: $(n, \overline{w}, \phi, \varepsilon, \rho_?, \rho_!, O, C, W)$. The code (`coviber/persona.py`, VoiceProfile dataclass, lines 28–38) has nine fields matching that list one-for-one (`n_messages`, `avg_words`, `formality`, `emoji_rate`, `question_rate`, `exclaim_rate`, `top_openers`, `top_closers`, `vocabulary`). It is a 9-tuple, not an 8-tuple. This is an internal inconsistency and misstates the code.
+%   
+%   (2) EMOJI REGEX RANGE IS WRONG. The draft claims the second character-class range covers "the Miscellaneous-Technical through Geometric-Shapes range (U+2300–U+25FF)". The code (`persona.py` line 25) is `re.compile("[\\U0001F300-\\U0001FAFF⌀-➿]")`. The literals `⌀` and `➿` are U+2300 and U+27BF respectively — the actual upper bound is **U+27BF**, not U+25FF. U+25FF is the end of Geometric Shapes; U+27BF is inside the Dingbats block, well beyond Geometric Shapes and past Miscellaneous Symbols (U+2600–U+26FF) and most of Dingbats (U+2700–U+27BF). Both the numeric endpoint and the block-name description ("Geometric-Shapes") misstate what the code actually matches. The comment at lines 21–24 in the source also references dingbats explicitly, confirming the intent is the wider Dingbats-inclusive range.
+%   
+%   Other technical claims verified against `coviber/persona.py`: formality formula $\phi = \text{clip}(0.5 + \Delta/4n)$ matches line 102; formal/casual marker vocabularies match lines 71–72 exactly; thresholds $\phi > 0.6$ formal, $\phi < 0.35$ casual, $\varepsilon > 0.15$ emoji match lines 53, 56; opener-vs-closer single-line disambiguation (`len(stripped_lines) > 1`) matches line 80; word regex `[A-Za-z][A-Za-z'-]+` matches line 19; vocab filters (stopword, len > 3, no apostrophe) match line 94; top-3/top-20 truncations match lines 110–112; system-prompt top-12 signature words matches line 60; empty-corpus sentinel wording matches lines 49–52; inference-free / local-only claim is upheld by the source (regex + Counter only, no imports of any model/embedding library).
+% Notes to assembler: Section uses \path{...} (package: url), \operatorname{clip}, and \lceil/\rceil — all covered by amsmath + url which the preamble should already include. Uses \coviber{} macro (define as \newcommand{\coviber}{\textsc{CoViber}} in preamble, or global-replace before compile).
+
+Minor deviation from prom
+
+\subsection{Statistical persona modelling}
+\label{sec:persona}
+
+A common failure mode of LLM-assisted drafting is that the model,
+lacking any knowledge of \emph{how a specific user writes}, defaults to a
+generic assistant register. The obvious remedy --- fine-tune, or feed the
+LLM a large corpus of the user's prior writing at each request --- is
+either expensive or leaks the user's private history into a third-party
+inference call. \coviber{} instead computes a compact statistical
+\emph{voice profile} from the user's self-authored records and emits a
+short natural-language \emph{system prompt} that any downstream LLM can
+consume. \textbf{No LLM inference is performed anywhere in this
+pipeline}; every quantity in the profile is derived by regular
+expressions and counters over local text (\path{coviber/persona.py}).
+
+\paragraph{The voice profile.}
+Let $M = (m_1, \ldots, m_n)$ be the sequence of non-empty text bodies of
+records whose \texttt{from\_name} matches the configured user identity.
+The \texttt{VoiceProfile} learned from $M$ is the 8-tuple
+\begin{equation}
+  V(M) \;=\;
+  \bigl(
+    n,\;
+    \overline{w},\;
+    \phi,\;
+    \varepsilon,\;
+    \rho_?,\;
+    \rho_!,\;
+    O,\;
+    C,\;
+    W
+  \bigr)
+  \label{eq:voice}
+\end{equation}
+where $n$ is the number of messages, $\overline{w}$ is the mean word
+count per message, $\phi \in [0,1]$ is the formality index defined
+below, $\varepsilon$ is the mean emoji count per message,
+$\rho_?, \rho_!$ are the mean per-message counts of \texttt{?} and
+\texttt{!}, and $O, C, W$ are the multisets of the top-3 openers, top-3
+closers and top-20 signature vocabulary items (each stored with a count).
+
+\paragraph{Formality signal.}
+Let \textsc{formal} and \textsc{casual} be fixed marker vocabularies:
+\begin{align*}
+  \textsc{formal} &= \{\text{\emph{please, kindly, regards, sincerely, would you, could you, i would}}\} \\
+  \textsc{casual} &= \{\text{\emph{hey, yeah, gonna, lol, thx, cool, sure thing, np}}\}
+\end{align*}
+For each message $m_i$, let $f_i$ (resp.\ $c_i$) be the number of
+substring occurrences of \textsc{formal} (resp.\ \textsc{casual})
+markers in the lowercased body. Let
+$\Delta = \sum_{i=1}^{n} (f_i - c_i)$. The formality index is
+\begin{equation}
+  \phi \;=\; \operatorname{clip}_{[0,1]}\!\left(\tfrac{1}{2} + \tfrac{\Delta}{4n}\right)
+  \label{eq:formality}
+\end{equation}
+so that $\phi = 0.5$ is the neutral midpoint reached when
+$\Delta = 0$, and the corpus must average one net marker per message
+across four messages to move $\phi$ by $0.25$. The scale factor $4n$
+makes $\phi$ robust to short bursty samples --- a single very formal
+message cannot alone push a corpus to $\phi \to 1$.
+
+\paragraph{Opener/closer detection.}
+Naively regex-matching openings and closings on the whole message body
+produces double counts on the very common \emph{single-line}
+acknowledgement (``\texttt{Thanks!}''), because it matches both the
+opener regex (\texttt{thanks} $\in$ greeting alternation) and the closer
+regex. \coviber{} avoids this by treating single-line messages as
+having an opener \emph{or} a closer, not both. Concretely, let
+$L(m_i) = (\ell_1, \ldots, \ell_k)$ be the non-empty lines of $m_i$.
+Then the opener regex is matched against $\ell_1$; the closer regex is
+matched against $\ell_k$ only when $k > 1$
+(\path{persona.py}, audit L6/\#26). This makes $|O|$ and $|C|$
+independently meaningful signals.
+
+\paragraph{Signature vocabulary filter.}
+The vocabulary counter $W$ ranks tokens produced by the regex
+\texttt{[A-Za-z][A-Za-z'-]+} against three filters, applied in order:
+(i) reject a fixed stopword list of pronouns, articles, and function
+words; (ii) reject tokens of length $\leq 3$; (iii) reject any token
+containing an ASCII apostrophe. Filter (iii) is deliberate: contractions
+such as \emph{don't}, \emph{I'll}, \emph{we're} are essentially uniform
+across English speakers and carry no idiolectal signal, so admitting
+them would dominate the top-$k$ list and drown out the actual signature
+terms (audit L6/\#28). The result is a compact ordered list of at most
+20 distinctive multi-character words.
+
+\paragraph{Emoji regex.}
+The emoji counter uses a single compiled character-class regex covering
+the Unicode Supplementary Multilingual Plane emoji blocks
+(\texttt{U+1F300}--\texttt{U+1FAFF}) plus the Miscellaneous-Technical
+through Geometric-Shapes range (\texttt{U+2300}--\texttt{U+25FF}); the
+latter picks up clock, watch, and simple-shape glyphs that occur in
+professional writing and would otherwise be missed (audit L6/\#30).
+
+\paragraph{System prompt.}
+For a display name $\eta$, \texttt{VoiceProfile.system\_prompt}$(\eta)$
+returns a single-paragraph natural-language instruction of the form
+\begin{quote}\small\itshape
+Write as $\eta$. Voice: $\{$formal $\mid$ neutral $\mid$ casual$\}$,
+$\sim\!\!\lceil\overline{w}\rceil$ words per message,
+$\{$occasionally $\mid$ rarely$\}$ uses emoji. Typically opens with
+``$o_1$'' and closes with ``$c_1$''. Signature vocabulary:
+$w_1, \ldots, w_{12}$. Match this tone and length; do not over-explain.
+\end{quote}
+with the register bucketed by thresholds $\phi > 0.6$ (formal),
+$\phi < 0.35$ (casual), else neutral; the emoji clause switches at
+$\varepsilon > 0.15$ emojis per message. This prompt is the sole
+artefact consumed by the downstream LLM --- there is no embedding
+lookup, no fine-tune, no per-message inference on \coviber{}'s side.
+
+\paragraph{Empty-corpus sentinel.}
+When \texttt{n\_messages} $= 0$, the system prompt does not fabricate
+plausible-sounding defaults (which would encode a spurious ``formal, 0
+words per message'' voice) but returns the sentinel string
+\begin{quote}\small\itshape
+No self-authored writing samples were found for $\eta$. No voice
+profile learned --- draft in your own default voice.
+\end{quote}
+This is load-bearing: an MCP client receiving this string can transparently
+fall back to its own defaults without producing a corrupted persona
+(audit L6/\#29).
+
+\paragraph{Complexity and privacy.}
+Learning $V(M)$ is a single linear pass over the concatenated text with
+constant per-token work, so $|V(M)| = O(\sum_i |m_i|)$ time and
+$O(|W| + |O| + |C|)$ space --- bounded by the top-$k$ truncations, i.e.\
+$O(1)$ in the corpus size. Because every operation is a local regex or
+counter increment, the profile can be recomputed on every
+\texttt{voice\_profile} MCP call (\S\ref{sec:mcp}) without cache
+invalidation logic; the only I/O is the local record store read.
+Crucially, no message body ever leaves the host during profile
+construction --- the profile is derived, emitted, and discarded on the
+same machine.
