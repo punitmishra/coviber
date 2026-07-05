@@ -54,9 +54,66 @@ def test_workgraph_entities():
     g = WorkGraph(known_projects=["Falcon"], you="you")
     g.ingest([Record(source="github", from_name="Margaret Chen",
                      subject="PR #482: Falcon fix", text="review please ATLAS-1290")])
-    assert "Margaret Chen" in g.people
+    # Post-L4: keys are lowercased, display form lives on the node.
+    assert "margaret chen" in g.people
+    assert g.people["margaret chen"]["display_name"] == "Margaret Chen"
     assert "Falcon" in g.projects
     assert any("ATLAS-1290" in t or "PR #482" in t for t in g.tickets)
+
+
+def test_workgraph_project_match_word_boundary_not_substring():
+    """Short/common project names must NOT match as substrings inside
+    unrelated words: "Go" doesn't hit "going", "AI" doesn't hit "email"
+    or "rail" (audit finding L4/#12)."""
+    g = WorkGraph(known_projects=["Go", "AI", "Falcon"], you="you")
+    g.ingest([Record(source="s", from_name="Ada", text="Going to the rail conference for email design")])
+    # Only false positives possible under the old substring code — all three
+    # should be absent from the graph now.
+    assert "Go" not in g.projects and "AI" not in g.projects and "Falcon" not in g.projects
+    # Positive control: an actual word match still lands.
+    g2 = WorkGraph(known_projects=["Go"], you="you")
+    g2.ingest([Record(source="s", from_name="Ada", text="Please review the Go migration plan")])
+    assert "Go" in g2.projects
+
+
+def test_workgraph_pr_ticket_canonicalization():
+    """`PR #482` and `PR#482` are the same PR — the graph must dedupe them
+    into a single ticket node (audit finding L4/#11)."""
+    g = WorkGraph(you="you")
+    g.ingest([
+        Record(source="s", from_name="A", subject="PR #482 review please"),
+        Record(source="s", from_name="B", text="fix landing in PR#482"),
+        Record(source="s", from_name="C", text="ship PR   #482"),  # extra whitespace
+    ])
+    pr_tickets = [t for t in g.tickets if "482" in t]
+    assert pr_tickets == ["PR #482"]
+
+
+def test_workgraph_person_identity_case_insensitive():
+    """Case-different display names collapse to one node — "Ada Byron",
+    "ada byron", and "ADA BYRON" all merge (audit finding L4/#14). The
+    graph preserves the mixed-case display form on the node."""
+    g = WorkGraph(you="you")
+    g.ingest([
+        Record(source="email", from_name="Ada Byron", text="hi"),
+        Record(source="slack", from_name="ada byron", text="hi again"),
+        Record(source="github", from_name="ADA BYRON", text="pr comment"),
+    ])
+    ada_keys = [k for k in g.people if "ada" in k]
+    assert ada_keys == ["ada byron"]
+    assert g.people["ada byron"]["interaction_count"] == 3
+    assert g.people["ada byron"]["display_name"] == "Ada Byron"  # mixed-case wins
+
+
+def test_workgraph_channel_and_ticket_mentions_are_incremented():
+    """Channels and tickets carried dead `mentions=0` counters — after L4/#13
+    they tick alongside interaction_count for people."""
+    g = WorkGraph(known_projects=["Falcon"], you="you")
+    for _ in range(3):
+        g.ingest([Record(source="slack", from_name="Ada", channel="#general",
+                          subject="Falcon PR #482 review", text="please")])
+    assert g.channels["#general"]["mentions"] == 3
+    assert g.tickets["PR #482"]["mentions"] == 3
 
 
 def test_record_id_has_no_field_boundary_collisions():
@@ -258,6 +315,10 @@ def test_empty_list_urgency_config_opts_out_of_defaults():
 
 _ALL = [test_loaders_registered, test_demo_pipeline_end_to_end, test_dedup_is_idempotent,
         test_urgency_signals, test_workgraph_entities,
+        test_workgraph_project_match_word_boundary_not_substring,
+        test_workgraph_pr_ticket_canonicalization,
+        test_workgraph_person_identity_case_insensitive,
+        test_workgraph_channel_and_ticket_mentions_are_incremented,
         test_record_id_has_no_field_boundary_collisions, test_ticket_regex_matches_bare_issue_refs,
         test_mention_regex_ignores_emails_and_trailing_punctuation,
         test_workgraph_excludes_you_case_insensitively, test_triage_skips_self_authored,

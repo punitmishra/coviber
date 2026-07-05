@@ -24,6 +24,20 @@ class WorkGraph:
         self.known_projects = [p for p in (known_projects or [])]
         self.ticket_re = ticket_re or DEFAULT_TICKET_RE
         self.you = you
+        # Pre-compile a word-boundary regex per known project so we don't
+        # rebuild on every record. `\b` catches the natural token edges
+        # (whitespace, punctuation); re.escape handles projects like "C++"
+        # or ".NET". Short/common names (Go, AI, ML) previously matched as
+        # substrings inside unrelated words ("going", "rail", "email") —
+        # this is the whole point of audit finding L4/#12.
+        self._project_patterns = [
+            (p, re.compile(rf"\b{re.escape(p.lower())}\b"))
+            for p in self.known_projects
+        ]
+        # Case-preserving display: store canonical (lowercase) key → best
+        # display we've seen. `people` iteration returns the lowercase key,
+        # but callers that want a pretty label can pull `display_name` off
+        # the node dict.
         self.people: dict[str, dict] = defaultdict(lambda: _node(["platforms", "projects", "channels"]))
         self.projects: dict[str, dict] = defaultdict(lambda: _node(["people", "channels", "tickets"]))
         self.channels: dict[str, dict] = defaultdict(lambda: _node(["people", "projects"]))
@@ -35,16 +49,51 @@ class WorkGraph:
 
     def _ingest_one(self, r: Record):
         blob = f"{r.subject} {r.text}"
+        blob_lower = blob.lower()
         you = self.you.lower()
-        people = set(filter(None, [r.from_name, r.recipient]))
-        people |= set(MENTION_RE.findall(r.text))
-        people = {p for p in people if p.lower() != you}
-        projects = {p for p in self.known_projects if p.lower() in blob.lower()}
-        channels = {r.channel} if r.channel else set()
-        tickets = {m if isinstance(m, str) else m[0] for m in self.ticket_re.findall(f"{blob} {r.url}")}
 
-        for person in people:
-            n = self.people[person]
+        # Person identity: normalize keys to lowercase so "Ada Byron" and
+        # "ada byron" collapse to one node. This does NOT resolve display
+        # name vs. mention handle (e.g. "Ada Byron" from email vs "@ada"
+        # from Slack) — that would need an alias table — but it fixes the
+        # trivial case-difference fragmentation (audit finding L4/#14).
+        raw_people = set(filter(None, [r.from_name, r.recipient]))
+        raw_people |= set(MENTION_RE.findall(r.text))
+        # Map lowercase key → display form. Rule: the first non-lowercase
+        # form we see wins ("Ada Byron" beats "ada byron"), but later forms
+        # don't replace it ("ADA BYRON" doesn't overwrite "Ada Byron"). The
+        # lowercase-only form is a fallback used only until a better form
+        # arrives.
+        people: dict[str, str] = {}
+        for p in raw_people:
+            k = p.lower()
+            if k == you:
+                continue
+            prev = people.get(k)
+            if prev is None or (prev == k and p != k):
+                people[k] = p
+
+        projects = {p for p, pat in self._project_patterns if pat.search(blob_lower)}
+        channels = {r.channel} if r.channel else set()
+
+        # Ticket normalization: collapse "PR #482" / "PR#482" / "PR  #482"
+        # to a single canonical form so re-scrapes of the same PR don't
+        # produce two graph nodes (audit finding L4/#11).
+        raw_tickets = self.ticket_re.findall(f"{blob} {r.url}")
+        tickets = set()
+        for m in raw_tickets:
+            token = m if isinstance(m, str) else m[0]
+            tickets.add(re.sub(r"PR\s*#\s*", "PR #", token))
+
+        person_keys = set(people.keys())
+        for key, display in people.items():
+            n = self.people[key]
+            # Preserve the best display we've seen across records: don't
+            # replace a mixed-case form with a lowercase-only one, and don't
+            # let a later "ADA BYRON" clobber an earlier "Ada Byron".
+            prev_display = n.get("display_name") or ""
+            if not prev_display or (prev_display == key and display != key):
+                n["display_name"] = display
             n["platforms"].add(r.source)
             n["projects"] |= projects
             n["channels"] |= channels
@@ -55,16 +104,22 @@ class WorkGraph:
                 n["last_seen"] = max(n.get("last_seen", ""), r.ts)
         for project in projects:
             n = self.projects[project]
-            n["people"] |= people
+            n["people"] |= person_keys
             n["channels"] |= channels
             n["tickets"] |= tickets
             n["mentions"] += 1
+        # Channels and tickets: also count the interaction so the counters
+        # aren't dead zeros in the serialised graph (audit finding L4/#13).
         for ch in channels:
-            self.channels[ch]["people"] |= people
-            self.channels[ch]["projects"] |= projects
+            n = self.channels[ch]
+            n["people"] |= person_keys
+            n["projects"] |= projects
+            n["mentions"] += 1
         for tk in tickets:
-            self.tickets[tk]["people"] |= people
-            self.tickets[tk]["projects"] |= projects
+            n = self.tickets[tk]
+            n["people"] |= person_keys
+            n["projects"] |= projects
+            n["mentions"] += 1
 
     # --- queries ---
     def person(self, name: str) -> dict:
@@ -92,9 +147,10 @@ class WorkGraph:
 
 def _node(set_fields):
     d = {f: set() for f in set_fields}
-    d["interaction_count"] = 0
-    d["mentions"] = 0
+    d["interaction_count"] = 0  # only ticked for people
+    d["mentions"] = 0            # ticked for projects, channels, and tickets
     d["last_seen"] = ""
+    d["display_name"] = ""      # populated for people; canonicalized-case form
     return d
 
 
