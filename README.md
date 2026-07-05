@@ -49,7 +49,8 @@ urgency → search → MCP) is loader-agnostic.
 ```
 
 Built-in loaders: **`demo`** (synthetic, zero-setup), **`jsonl`** (universal),
-**`webscrape`** (config-driven CSS selectors — no per-site code).
+**`slackexport`** (Slack workspace export dir, pure stdlib), **`webscrape`**
+(config-driven CSS selectors — no per-site code).
 
 ## Quickstart (30 seconds)
 
@@ -116,6 +117,12 @@ coviber query "GPU fallback for embeddings"
 ```bash
 coviber ingest --loader jsonl --path examples/acme_demo.jsonl
 coviber triage
+```
+
+**Slack workspace export** (the zip Slack gives you, extracted):
+
+```bash
+coviber ingest --loader slackexport --path ~/slack-export   # YAML config adds: channels: [...], you: "your name"
 ```
 
 **Scrape a page** (structure lives in config, not code):
