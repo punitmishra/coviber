@@ -101,8 +101,10 @@ def test_slackexport_end_to_end_ingest():
         g = stats["graph"]
         assert set(g["projects_list"]) == {"Atlas", "Falcon", "Orbit"}
         assert g["channels"] == 2
-        assert {"Grace Hopper", "Ada Byron"} <= set(g["top_people"])
-        assert "Margaret Chen" not in g["top_people"]  # "you" is excluded from people
+        # Post-L4: person keys are lowercased in the graph (display form
+        # available on the node).
+        assert {"grace hopper", "ada byron"} <= set(g["top_people"])
+        assert "margaret chen" not in g["top_people"]  # "you" is excluded from people
 
 
 _ALL = [test_slackexport_registered, test_slackexport_mapping_and_replied,
