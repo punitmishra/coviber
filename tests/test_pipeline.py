@@ -129,6 +129,46 @@ def test_jsonl_loader_handles_null_source_and_reports_bad_lines():
             assert "in.jsonl:1" in str(e)
 
 
+def test_jsonl_loader_reports_bad_line_number_mid_stream():
+    """A bad line at position N must name that line in the error message —
+    otherwise the operator has no signal about where to fix the input
+    (audit finding L3/#5). The loader's fail-loud contract for corrupt
+    input is intentional; this test pins the diagnostic content."""
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "in.jsonl"
+        p.write_text(
+            json.dumps({"source": "s", "text": "line 1"}) + "\n"
+            + "not-json-line-2\n"
+            + json.dumps({"source": "s", "text": "line 3"}) + "\n",
+            encoding="utf-8",
+        )
+        try:
+            list(get_loader("jsonl", {"path": str(p)}).load())
+            raise AssertionError("expected ValueError for corrupt line 2")
+        except ValueError as e:
+            msg = str(e)
+            assert "in.jsonl:2" in msg  # names the specific line
+            assert "invalid JSON" in msg
+
+
+def test_jsonl_loader_handles_numeric_epoch_ts():
+    """Records with a numeric epoch ts (a common shape for API dumps) must
+    now flow through without crashing — before the L1 _normalize_ts fix,
+    `.strip()` on an int raised AttributeError uncaught (audit finding L3/#5
+    + L1/#1)."""
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "in.jsonl"
+        p.write_text(
+            json.dumps({"source": "s", "text": "epoch", "ts": 1700000000}) + "\n"
+            + json.dumps({"source": "s", "text": "bool-ts", "ts": True}) + "\n",
+            encoding="utf-8",
+        )
+        recs = list(get_loader("jsonl", {"path": str(p)}).load())
+        assert [r.text for r in recs] == ["epoch", "bool-ts"]  # both parsed
+        # int epoch in the sanity range normalizes to ISO
+        assert recs[0].ts.startswith("2023-")
+
+
 def test_cli_accepts_data_dir_after_subcommand():
     for argv in (["serve", "--data-dir", "/tmp/x"], ["--data-dir", "/tmp/x", "serve"], ["demo"]):
         args = build_parser().parse_args(argv)
