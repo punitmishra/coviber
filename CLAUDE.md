@@ -94,15 +94,24 @@ stay green; they are the required checks for merging to `main`.
 - Python floor is **3.9** (`requires-python`); no 3.10+ syntax or
   stdlib-API-without-shim outside the `[mcp]`-gated module.
 
-## Status (2026-07 — v0.1.x, post merge train #1–#7)
+## Status (2026-07 — v0.4.0, post two adversarial audit passes)
 
 Built & verified: Record (ISO-UTC ts) + 6 loaders (demo/jsonl/webscrape/mbox/
-imap/slackexport), WorkGraph, urgency triage ([0,14], test-pinned), persona
-engine, store (atomic dedup + advisory write lock + persisted embedding cache),
-pipeline, CLI, MCP server (7 tools, `COVIBER_CONFIG` parity with the CLI),
-59 tests green, reproducible bench that reports the backend that actually ran,
-CI, Apache-2.0 + NOTICE + CITATION + DATASHEET + ARCHITECTURE + CONTRIBUTING +
-SECURITY + issue templates + PR template.
+imap/slackexport), WorkGraph (case-insensitive person identity, word-boundary
+project matching), urgency triage (`[0, 14]` at defaults, custom weights raise
+the ceiling with the caller's eyes open), persona engine (empty-corpus sentinel,
+contraction filter), store (atomic dedup + advisory write lock + persisted
+embedding cache, PID+uuid-tagged tmp files, corrupt-line quarantine), optional
+Qdrant backend via the `[qdrant]` extra + `docker-compose.yml`, pipeline, CLI,
+MCP server (7 tools, `COVIBER_CONFIG` parity, torn-graph defensive reads),
+130+ tests green, reproducible bench, CI (3.9/3.11/3.13 + zero-dep core + mcp
+name-set smoke), Apache-2.0 + NOTICE + CITATION + DATASHEET + ARCHITECTURE
++ CONTRIBUTING + SECURITY + issue templates + PR template.
+
+Two adversarial audit passes have landed on this codebase:
+- **v0.4 layer audit** (142 agents, 45 → 35 findings, 7 layer PRs).
+- **v0.5 architect audit** (175 agents, 55 → 34 findings, docs/DX/contract PRs +
+  12 tracked issues + accepted-invariants section in `ARCHITECTURE.md`).
 
 ## What's next → see [ROADMAP.md](ROADMAP.md)
 

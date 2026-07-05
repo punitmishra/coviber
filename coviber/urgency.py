@@ -137,11 +137,15 @@ def _age_hours(r: Record) -> float:
 
 
 def score(r: Record, cfg: Config) -> tuple[int, list[str]]:
-    """Return (urgency in [0, MAX_URGENCY], list of signals fired).
+    """Return (urgency, list of signals fired).
 
-    At default weights this is [0, 14] — the documented contract, pinned by
-    the test_urgency_contract suite. Custom weights change the ceiling; a
-    weight of 0 disables the signal (it never fires, never labels).
+    At **default weights** the score is in `[0, 14]` — a documented contract
+    pinned by `test_urgency_contract`. With **custom weights** the ceiling
+    changes in proportion to the caller's config: the score is naturally
+    bounded by `sum(non_age_weights) + max(age_tier_weights)` since the
+    three age tiers are mutually exclusive. No clamp is applied; a caller
+    who bumps `mention` from 3 to 10 gets scores that reflect their choice.
+    A weight of 0 disables the signal (it never fires, never labels).
     """
     signals: list[str] = []
     text = (r.text or "")
@@ -181,9 +185,9 @@ def score(r: Record, cfg: Config) -> tuple[int, list[str]]:
         fire("age_48h", "age>48h")
     elif age > 24:
         fire("age_24h", "age>24h")
-    # Ceiling is defaults' max (14) — a config that raises weights above the
-    # default sum still gets clamped, keeping the [0, 14] contract for anyone
-    # who hasn't opted into custom weights.
+    # Score is naturally bounded by which signals fired × their weights. At
+    # default weights u ≤ 14 (contract). Custom weights change the ceiling
+    # with the caller's eyes open — no silent clamp masking their config.
     return u, signals
 
 
