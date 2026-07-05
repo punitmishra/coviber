@@ -49,8 +49,9 @@ urgency → search → MCP) is loader-agnostic.
 ```
 
 Built-in loaders: **`demo`** (synthetic, zero-setup), **`jsonl`** (universal),
-**`slackexport`** (Slack workspace export dir, pure stdlib), **`webscrape`**
-(config-driven CSS selectors — no per-site code).
+**`mbox`** / **`imap`** (email, pure stdlib), **`slackexport`** (Slack workspace
+export dir, pure stdlib), **`webscrape`** (config-driven CSS selectors — no
+per-site code).
 
 ## Quickstart (30 seconds)
 
@@ -121,6 +122,28 @@ coviber query "GPU fallback for embeddings"
 ```bash
 coviber ingest --loader jsonl --path examples/acme_demo.jsonl
 coviber triage
+```
+
+**Email (mbox/IMAP)** — pure stdlib, nothing to install:
+
+```bash
+coviber ingest --loader mbox --path ~/mail.mbox
+```
+
+```yaml
+# imap.yaml — the password stays in the environment, never in config
+loader: imap
+config:
+  host: imap.example.com
+  username: you@example.com
+  password_env: COVIBER_IMAP_PASSWORD   # name of the env var holding the password
+  mailbox: INBOX
+  limit: 200
+  unread_only: true
+```
+
+```bash
+COVIBER_IMAP_PASSWORD=... coviber ingest --config imap.yaml
 ```
 
 **Slack workspace export** (the zip Slack gives you, extracted):
