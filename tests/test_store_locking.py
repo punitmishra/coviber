@@ -84,3 +84,82 @@ def test_upsert_quarantines_corrupt_lines(tmp_path):
     # idempotent: rewriting again does not duplicate the quarantined line
     store.upsert([Record(source="t", text="third")])
     assert bad_path.read_text(encoding="utf-8").count("{not json") == 1
+
+
+def test_store_survives_non_string_ts_fields(tmp_path):
+    """A hand-edited records.jsonl or a JSONL loader that emits a numeric epoch
+    or a boolean must not crash the store — before the fix _normalize_ts called
+    .strip() on the raw value and raised AttributeError uncaught, bricking
+    every subsequent read (audit finding L1/#1)."""
+    import json
+    store = Store(tmp_path)
+    # Seed via upsert so records.jsonl exists.
+    store.upsert([Record(source="t", text="seed")])
+    # Now append records with non-string ts values that would have crashed
+    # _normalize_ts pre-fix. Both should survive the next read.
+    with store.records_path.open("a", encoding="utf-8") as f:
+        for row in ({"source": "t", "text": "int-ts", "ts": 1700000000, "id": "a" * 32},
+                    {"source": "t", "text": "bool-ts", "ts": True, "id": "b" * 32}):
+            f.write(json.dumps(row) + "\n")
+    texts = {r.text for r in store.all()}
+    assert {"seed", "int-ts", "bool-ts"} <= texts  # no crash, all parsed
+
+
+def test_save_graph_write_is_atomic(tmp_path):
+    """workgraph.json must be written via write-then-rename so a mid-write
+    crash / Ctrl-C can't leave the MCP graph tools staring at a torn file
+    (audit finding L1/#7)."""
+    store = Store(tmp_path)
+    # Sanity: no tmp files linger under normal operation.
+    store.save_graph({"people": {"Alice": {}}, "projects": {}, "channels": {}, "tickets": {}})
+    strays = [p for p in tmp_path.iterdir() if ".tmp" in p.suffixes or ".tmp" in p.name]
+    assert not strays, f"leftover tmp files: {strays}"
+    # The final file is well-formed JSON.
+    import json
+    payload = json.loads((tmp_path / "workgraph.json").read_text(encoding="utf-8"))
+    assert payload["people"] == {"Alice": {}}
+
+
+def _concurrent_search(data_dir, barrier):
+    """Race two searches against a shared JSONVectorStore. Pre-fix they
+    stomped on a shared `embeddings.json.tmp`; post-fix each writer uses a
+    unique PID+uuid tmp path so os.replace can't fail mid-race."""
+    import coviber
+    from coviber.record import Record  # noqa: F401
+    from coviber.store import Store
+    # Contextual import so the child sees THIS checkout.
+    assert coviber.__file__.startswith(str(ROOT)), coviber.__file__
+    store = Store(data_dir)
+    barrier.wait()
+    # Loop a few times so misses/persists overlap.
+    for _ in range(3):
+        store.search("gibberish query")
+
+
+def test_concurrent_search_does_not_race_on_tmp(tmp_path):
+    """The two search callers must complete without OSError from a shared
+    tmp path collision (audit finding L1/#6 + test-gap L1/#10). We can't
+    guarantee the embedding backend is installed in CI, so we prime with
+    an already-populated embeddings.json and let the JSONVectorStore code
+    exercise its persist/load paths under real concurrent read+write."""
+    import multiprocessing
+    store = Store(tmp_path)
+    store.upsert([Record(source="t", text=f"m{i}") for i in range(5)])
+    # Prime the vector cache so search() has vectors to load; we build a
+    # minimal one directly to avoid pulling sentence-transformers into CI.
+    import json as _json
+    vecs = {r.id: [0.1] * 8 for r in store.all()}
+    (tmp_path / "embeddings.json").write_text(
+        _json.dumps({"model": "all-MiniLM-L6-v2", "vectors": vecs}), encoding="utf-8",
+    )
+    ctx = multiprocessing.get_context("spawn")
+    barrier = ctx.Barrier(3)
+    procs = [ctx.Process(target=_concurrent_search, args=(str(tmp_path), barrier))
+             for _ in range(3)]
+    for p in procs: p.start()
+    for p in procs: p.join(timeout=60)
+    assert all(p.exitcode == 0 for p in procs), [p.exitcode for p in procs]
+    # No lingering tmp files with the pid+uuid pattern.
+    strays = [p for p in tmp_path.iterdir()
+              if p.name.startswith("embeddings.json.tmp.") or p.name.startswith("workgraph.json.tmp.")]
+    assert not strays, f"leftover tmp files: {strays}"
