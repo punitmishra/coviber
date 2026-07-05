@@ -62,7 +62,7 @@ def test_mbox_loader_maps_fields():
         grace = by_sender["Grace Hopper"]
         assert grace.source == "email" and grace.channel == "inbox"
         assert grace.recipient == "you@acme.com"
-        assert grace.ts == "2026-07-02T09:15:00-07:00"  # RFC-2822 Date -> ISO-8601
+        assert grace.ts == "2026-07-02T16:15:00+00:00"  # RFC-2822 Date -> ISO-8601, normalized to UTC
         assert grace.thread_id == "<falcon-1@acme.com>" and not grace.unread
         ada = by_sender["Ada Byron"]
         assert "tenant schema" in ada.text and "fake-bytes" not in ada.text  # attachment skipped
