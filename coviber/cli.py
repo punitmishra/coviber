@@ -4,8 +4,8 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from pathlib import Path
 
+from .config import read_config
 from .loaders import available
 from .pipeline import Settings, build_queue, ingest
 from .store import Store
@@ -14,7 +14,7 @@ from .store import Store
 def _load_settings(args) -> Settings:
     cfg = {}
     if args.config:
-        cfg = _read_config(args.config)
+        cfg = read_config(args.config)
     if getattr(args, "loader", None):
         cfg["loader"] = args.loader
     if getattr(args, "path", None):
@@ -22,18 +22,6 @@ def _load_settings(args) -> Settings:
     if getattr(args, "data_dir", None):
         cfg["data_dir"] = args.data_dir
     return Settings.from_dict(cfg)
-
-
-def _read_config(path: str) -> dict:
-    p = Path(path)
-    text = p.read_text()
-    if p.suffix in (".yaml", ".yml"):
-        try:
-            import yaml
-        except ImportError:
-            sys.exit("YAML config needs pyyaml: pip install pyyaml")
-        return yaml.safe_load(text) or {}
-    return json.loads(text)
 
 
 def cmd_ingest(args):
@@ -142,6 +130,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sv = sub.add_parser("serve", parents=[common],
                         help="start the local MCP server (stdio) for Claude / any MCP client")
+    sv.add_argument("--config", help="YAML/JSON settings file (exported to the server as COVIBER_CONFIG)")
     sv.set_defaults(func=cmd_serve)
     return p
 
@@ -155,6 +144,8 @@ def cmd_serve(args):
     import os
     if args.data_dir:
         os.environ["COVIBER_DATA_DIR"] = os.path.expanduser(args.data_dir)
+    if args.config:
+        os.environ["COVIBER_CONFIG"] = os.path.expanduser(args.config)
     try:
         from .mcp_server import main as serve_main
     except ImportError:

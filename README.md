@@ -70,11 +70,15 @@ Point your MCP client at the local server — done. No account, no cloud, no tel
     "coviber": {
       "command": "coviber",
       "args": ["serve", "--data-dir", "~/.coviber"],
-      "env": { "COVIBER_YOU": "you" }
+      "env": { "COVIBER_YOU": "you", "COVIBER_CONFIG": "~/.coviber/config.yaml" }
     }
   }
 }
 ```
+
+`COVIBER_CONFIG` points the server at the same YAML/JSON settings file the CLI
+takes, so `catch_me_up` scores with your `priority_senders`, `collaborators`,
+`known_projects`, and skip rules — identical to `coviber triage --config`.
 
 MCP tools exposed: `recall` (semantic search), `catch_me_up` (urgency queue),
 `who_is` / `project_status` / `graph_summary` (work graph), `voice_profile`

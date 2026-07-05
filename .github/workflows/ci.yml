@@ -60,7 +60,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -e ".[mcp]"
+      - run: pip install -e ".[mcp,scrape]" pytest
+      - name: full test suite with the mcp extra (runs the mcp-gated tests)
+        run: python -m pytest tests/ -v
       - name: tool registration smoke test
         run: |
           python -c "
