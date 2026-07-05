@@ -271,5 +271,5 @@ yourself. Numbers scale with `--scale` and hardware. See [DATASHEET](DATASHEET.m
 [Architecture](ARCHITECTURE.md) · [Whitepaper](WHITEPAPER.md) · [Datasheet](DATASHEET.md) · [Contributing](CONTRIBUTING.md)
 
 ## Status & license
-v0.4 — a clean-room build on 100% synthetic data (see [DATASHEET](DATASHEET.md)).
+v0.5 — a clean-room build on 100% synthetic data (see [DATASHEET](DATASHEET.md)).
 Apache-2.0. Contributions of new loaders welcome — see [CONTRIBUTING](CONTRIBUTING.md).
