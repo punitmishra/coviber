@@ -65,7 +65,7 @@ def test_first_search_populates_cache_and_ranks_by_cosine():
         recs = _recs(3); store.upsert(recs)
         with fake_embedder(FakeEmbedder()):
             hits = store.search("subj 1 body text 1", limit=2)  # exact record text → cosine 1.0
-        assert store.last_search_backend == f"embeddings ({EMBED_MODEL})"
+        assert store.last_search_backend == f"embeddings ({EMBED_MODEL}) via JSONVectorStore"
         assert len(hits) == 2
         top_score, top_rec = hits[0]
         assert isinstance(top_score, float) and isinstance(top_rec, Record)

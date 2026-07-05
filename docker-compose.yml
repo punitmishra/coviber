@@ -1,0 +1,31 @@
+# Local Qdrant for coviber's optional [qdrant] backend.
+#
+# Usage:
+#   docker compose up -d
+#   pip install "coviber[qdrant]"
+#   COVIBER_QDRANT_URL=http://localhost:6333 coviber demo
+#
+# Volumes persist under ./data/qdrant/ next to the compose file. Delete the
+# directory to wipe the collection (or use QdrantVectorStore.wipe() from Python).
+# The image is pinned to a specific minor so `docker compose pull` doesn't
+# silently upgrade you into a schema change.
+
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.11.5
+    container_name: coviber-qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"   # REST API — what qdrant-client talks to
+      - "6334:6334"   # gRPC — only exposed for tools that need it
+    volumes:
+      - ./data/qdrant:/qdrant/storage
+    environment:
+      # Log at info by default; bump to debug when you're diagnosing.
+      QDRANT__LOG_LEVEL: INFO
+    healthcheck:
+      # /readyz returns 200 only when the storage layer is up.
+      test: ["CMD", "sh", "-c", "wget -qO- http://127.0.0.1:6333/readyz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20

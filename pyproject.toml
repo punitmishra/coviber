@@ -16,8 +16,9 @@ dependencies = []  # core runs on the standard library only
 [project.optional-dependencies]
 scrape = ["beautifulsoup4>=4.11", "pyyaml>=6"]
 search = ["sentence-transformers>=2.2", "numpy>=1.23"]
+qdrant = ["qdrant-client>=1.7"]
 mcp = ["mcp>=1.0"]
-all = ["beautifulsoup4>=4.11", "pyyaml>=6", "sentence-transformers>=2.2", "numpy>=1.23", "mcp>=1.0"]
+all = ["beautifulsoup4>=4.11", "pyyaml>=6", "sentence-transformers>=2.2", "numpy>=1.23", "qdrant-client>=1.7", "mcp>=1.0"]
 dev = ["pytest>=7", "ruff>=0.4"]
 
 [project.scripts]
