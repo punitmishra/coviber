@@ -215,3 +215,29 @@ def test_refresh_returns_readable_error_on_missing_file(tmp_path, monkeypatch):
     _clear_env(monkeypatch, "COVIBER_CONFIG", "COVIBER_YOU")
     out = refresh("jsonl", str(tmp_path / "does-not-exist.jsonl"))
     assert "refresh failed" in out
+
+
+# ---------------------------------------------------------------------------
+# Audit2 findings — ConfigError propagation + persisted-config invariant.
+# ---------------------------------------------------------------------------
+
+
+def test_bad_config_raises_config_error_per_tool_not_server_crash(tmp_path, monkeypatch):
+    """If COVIBER_CONFIG points at a missing / invalid file, the failure
+    must be per-tool (a `ConfigError` FastMCP renders into a tool error),
+    not a `sys.exit` that kills the whole server. Audit2/#9 pins this
+    invariant that ARCHITECTURE.md's "config re-read per tool call"
+    section documents."""
+    from coviber.config import ConfigError
+
+    # Point at a config path that doesn't exist.
+    monkeypatch.setenv("COVIBER_CONFIG", str(tmp_path / "no-such-config.yaml"))
+    _clear_env(monkeypatch, "COVIBER_DATA_DIR", "COVIBER_YOU")
+
+    # Every tool that calls _settings() must surface ConfigError, not
+    # SystemExit. Using catch_me_up as a representative — it hits the
+    # settings-read path immediately.
+    import pytest
+    with pytest.raises(ConfigError) as exc:
+        catch_me_up()
+    assert "no-such-config.yaml" in str(exc.value)

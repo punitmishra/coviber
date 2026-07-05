@@ -68,29 +68,17 @@ def catch_me_up(limit: int = 10) -> str:
 
 
 def _load_graph(data_dir: str):
-    """Read workgraph.json defensively.
-
-    Returns a dict, or a string on error / not-yet-built states. The store's
-    save_graph writes atomically (L1/#7), but a torn file could still land
-    if the operator hand-edits it, or if a partial write from an older
-    coviber version predates the fix — so guard the read at the boundary.
-    """
-    import json
-    from pathlib import Path
-    gp = Path(data_dir) / "workgraph.json"
-    if not gp.exists():
-        return "No graph yet — run `coviber ingest`."
-    try:
-        return json.loads(gp.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as e:
-        return f"Work graph is unreadable ({type(e).__name__}: {e}). Re-run `coviber ingest`."
+    """Thin wrapper for Store.load_graph — kept for backwards compatibility
+    with any external caller that imported _load_graph after v0.4 landed.
+    New callers should use `Store(data_dir).load_graph()` directly (audit2/#13)."""
+    return Store(data_dir).load_graph()
 
 
 @mcp.tool()
 def who_is(name: str) -> str:
     """What the work graph knows about a person: platforms, projects, channels, activity."""
     import json
-    g = _load_graph(_settings().data_dir)
+    g = Store(_settings().data_dir).load_graph()
     if isinstance(g, str):
         return g
     # WorkGraph stores person keys lowercased (L4/#14); the pretty form lives
@@ -105,7 +93,7 @@ def who_is(name: str) -> str:
 def project_status(name: str) -> str:
     """What the work graph knows about a project: people, channels, related tickets."""
     import json
-    g = _load_graph(_settings().data_dir)
+    g = Store(_settings().data_dir).load_graph()
     if isinstance(g, str):
         return g
     node = g.get("projects", {}).get(name)
@@ -116,7 +104,7 @@ def project_status(name: str) -> str:
 def graph_summary() -> str:
     """High-level shape of your context: counts + top people + projects."""
     import json
-    g = _load_graph(_settings().data_dir)
+    g = Store(_settings().data_dir).load_graph()
     if isinstance(g, str):
         return g
     # Use .get() everywhere so an old, hand-edited, or partially-populated

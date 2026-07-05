@@ -62,15 +62,26 @@ def cmd_query(args):
 
 def cmd_graph(args):
     store = Store(_load_settings(args).data_dir)
-    gp = store.dir / "workgraph.json"
-    if not gp.exists():
-        print("no graph yet — run `coviber ingest`."); return
-    g = json.loads(gp.read_text(encoding="utf-8"))
+    g = store.load_graph()
+    if isinstance(g, str):
+        # Shared defensive-read sentinel: "no graph yet" or "unreadable".
+        # audit2/#13 — the CLI used a bare json.loads and crashed on a torn
+        # workgraph.json where the MCP tools already reported cleanly.
+        print(g); return
     if args.person:
-        print(json.dumps(g["people"].get(args.person, {"error": "not found"}), indent=2)); return
-    print(json.dumps({"people": len(g["people"]), "projects": len(g["projects"]),
-                      "channels": len(g["channels"]), "tickets": len(g["tickets"]),
-                      "people_list": sorted(g["people"]), "projects_list": sorted(g["projects"])}, indent=2))
+        # Case-insensitive lookup matches MCP who_is behavior (post-L4/L7).
+        people = g.get("people", {})
+        name = args.person
+        node = people.get(name) or people.get(name.lower(), {"error": "not found"})
+        print(json.dumps(node, indent=2)); return
+    print(json.dumps({
+        "people": len(g.get("people", {})),
+        "projects": len(g.get("projects", {})),
+        "channels": len(g.get("channels", {})),
+        "tickets": len(g.get("tickets", {})),
+        "people_list": sorted(g.get("people", {})),
+        "projects_list": sorted(g.get("projects", {})),
+    }, indent=2))
 
 
 def cmd_demo(args):

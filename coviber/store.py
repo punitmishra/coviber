@@ -15,6 +15,7 @@ import json
 import math
 import os
 import sys
+import uuid
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Iterable
@@ -93,8 +94,14 @@ class Store:
         `resolve_vector_store` decides based on the `qdrant` config dict and
         the `COVIBER_QDRANT_URL` env var — falling back to `JSONVectorStore`
         when neither is set, preserving pre-v0.2 behavior.
+
+        `data_dir` is `expanduser()`'d here so `~/store` works regardless of
+        which config source supplied it (CLI --data-dir, COVIBER_DATA_DIR
+        env, YAML `data_dir:`, or a direct Settings construction). Before
+        this, only the CLI's serve command expanded, leaving MCP env-driven
+        and YAML-driven configs with literal `~` directories (audit2/#8).
         """
-        self.dir = Path(data_dir)
+        self.dir = Path(data_dir).expanduser()
         self.dir.mkdir(parents=True, exist_ok=True)
         self.records_path = self.dir / "records.jsonl"
         # Legacy attribute — some external callers may still read it; keep it
@@ -119,12 +126,25 @@ class Store:
                 if r.id not in existing:
                     n_new += 1
                 existing[r.id] = r
-            # write-then-rename so a crash mid-write can't destroy the store
-            tmp = self.records_path.with_suffix(".jsonl.tmp")
-            with tmp.open("w", encoding="utf-8") as f:
-                for r in existing.values():
-                    f.write(json.dumps(r.to_dict()) + "\n")
-            os.replace(tmp, self.records_path)
+            # write-then-rename so a crash mid-write can't destroy the store.
+            # PID+uuid-tag the tmp filename to match the pattern in
+            # JSONVectorStore._persist and save_graph — two writers that
+            # somehow bypass the advisory lock (unsupported platform, future
+            # bulk_import helper) can't clobber a shared .jsonl.tmp.
+            tmp = self.records_path.with_suffix(f".jsonl.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}")
+            try:
+                with tmp.open("w", encoding="utf-8") as f:
+                    for r in existing.values():
+                        f.write(json.dumps(r.to_dict()) + "\n")
+                os.replace(tmp, self.records_path)
+            except Exception:
+                # A raise between open and os.replace leaves an orphan tmp
+                # under records_path.jsonl.tmp.{pid}.{uuid}. Best-effort
+                # cleanup so the data_dir doesn't collect debris.
+                if tmp.exists():
+                    with suppress(OSError):
+                        tmp.unlink()
+                raise
         return n_new
 
     def all(self) -> list[Record]:
@@ -238,22 +258,38 @@ class Store:
 
     def save_graph(self, graph_dict: dict):
         # Write-then-rename so a SIGINT / Ctrl-C / crash mid-write can't leave a
-        # torn workgraph.json — the MCP tools (who_is / project_status /
-        # graph_summary) read this file with json.loads and no fallback, so a
-        # partial write would crash every subsequent tool call until re-ingest.
+        # torn workgraph.json — every reader of this file (MCP who_is /
+        # project_status / graph_summary; CLI graph) must be able to trust it.
         # PID+uuid tag on the tmp path guards the theoretical case where a
         # future caller races two ingest cycles on the same data_dir.
-        import uuid as _uuid  # local import: this method is called rarely
         with _write_lock(self.dir):
             target = self.dir / "workgraph.json"
-            tmp = target.with_suffix(f".json.tmp.{os.getpid()}.{_uuid.uuid4().hex[:8]}")
+            tmp = target.with_suffix(f".json.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}")
             try:
                 tmp.write_text(json.dumps(graph_dict, indent=2), encoding="utf-8")
                 os.replace(tmp, target)
             except Exception:
                 if tmp.exists():
-                    try:
+                    with suppress(OSError):
                         tmp.unlink()
-                    except OSError:
-                        pass
                 raise
+
+    def load_graph(self) -> dict | str:
+        """Read the persisted workgraph.json defensively.
+
+        Returns a dict when the file exists and parses. Returns a readable
+        string sentinel on the two failure modes (audit2/#13): (a) no graph
+        yet (run `coviber ingest`); (b) file exists but is torn / unreadable
+        (older coviber version predating the atomic-write fix, hand-edit,
+        external corruption). Callers that want to distinguish the two
+        check `isinstance(result, dict)`. This defensive-read helper lives
+        on Store so every reader — CLI, MCP tools, third-party embedders —
+        shares the same failure semantics.
+        """
+        gp = self.dir / "workgraph.json"
+        if not gp.exists():
+            return "No graph yet — run `coviber ingest`."
+        try:
+            return json.loads(gp.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as e:
+            return f"Work graph is unreadable ({type(e).__name__}: {e}). Re-run `coviber ingest`."
