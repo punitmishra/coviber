@@ -1,13 +1,16 @@
 """COVIBER_CONFIG parity — the MCP server honors the same settings file as the CLI.
 
-Requires the [mcp] extra (like CI's mcp job); run with: python -m pytest tests/test_mcp_config.py
+Needs the [mcp] extra: skipped wholesale when `mcp` isn't importable (the CI test
+matrix installs only [scrape]; CI's mcp job runs these).
 """
 import json
 
+import pytest
+
 from coviber import Settings, ingest
-from coviber.cli import build_parser
-from coviber.config import read_config
-from coviber.mcp_server import _settings, catch_me_up, refresh
+
+pytest.importorskip("mcp", reason="MCP server tests need the [mcp] extra")
+from coviber.mcp_server import _settings, catch_me_up, refresh  # noqa: E402
 
 CFG = """\
 you: punit
@@ -64,18 +67,6 @@ def test_config_path_expands_user(tmp_path, monkeypatch):
     monkeypatch.setenv("COVIBER_CONFIG", "~/config.yaml")
     _clear_env(monkeypatch, "COVIBER_DATA_DIR", "COVIBER_YOU")
     assert _settings().you == "punit"
-
-
-def test_read_config_json(tmp_path):
-    p = tmp_path / "c.json"
-    p.write_text(json.dumps({"you": "punit"}), encoding="utf-8")
-    assert read_config(str(p)) == {"you": "punit"}
-
-
-def test_serve_parser_accepts_config():
-    args = build_parser().parse_args(["serve", "--config", "x.yaml"])
-    assert args.config == "x.yaml"
-    assert args.func.__name__ == "cmd_serve"
 
 
 def test_catch_me_up_fires_config_signals(tmp_path, monkeypatch):
