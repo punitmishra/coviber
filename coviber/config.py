@@ -6,18 +6,40 @@ actually YAML (any extra that needs it, e.g. [scrape], pulls it in).
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
 
+class ConfigError(Exception):
+    """Raised on unreadable / unparseable / missing-dep settings files.
+
+    The CLI catches this and exits with a friendly message; the MCP server
+    lets it propagate so FastMCP converts it into a per-tool error instead
+    of killing the whole server on a bad config.
+    """
+
+
 def read_config(path: str) -> dict:
-    """Read a YAML/JSON settings file into a plain dict (`~` is expanded)."""
+    """Read a YAML/JSON settings file into a plain dict (`~` is expanded).
+
+    Raises ConfigError with the path in the message on any failure.
+    """
     p = Path(path).expanduser()
-    text = p.read_text(encoding="utf-8")
+    try:
+        text = p.read_text(encoding="utf-8")
+    except OSError as e:
+        raise ConfigError(f"config file {p}: {e}") from e
     if p.suffix in (".yaml", ".yml"):
         try:
             import yaml
-        except ImportError:
-            sys.exit("YAML config needs pyyaml: pip install pyyaml")
-        return yaml.safe_load(text) or {}
-    return json.loads(text)
+        except ImportError as e:
+            raise ConfigError(
+                f"config file {p}: YAML support needs pyyaml (pip install pyyaml)"
+            ) from e
+        try:
+            return yaml.safe_load(text) or {}
+        except yaml.YAMLError as e:
+            raise ConfigError(f"config file {p}: invalid YAML: {e}") from e
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as e:
+        raise ConfigError(f"config file {p}: invalid JSON: {e}") from e

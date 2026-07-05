@@ -26,6 +26,7 @@ class Settings:
     action_words: list = None       # None -> urgency defaults
     skip_senders: list = None
     skip_subjects: list = None
+    weights: dict = None            # None -> urgency.DEFAULT_WEIGHTS
 
     @classmethod
     def from_dict(cls, d: dict) -> "Settings":
@@ -41,6 +42,7 @@ class Settings:
             action_words=d.get("action_words"),
             skip_senders=d.get("skip_senders"),
             skip_subjects=d.get("skip_subjects"),
+            weights=d.get("weights"),
         )
 
 
@@ -66,5 +68,6 @@ def build_queue(settings: Settings) -> list[dict]:
                         collaborators=set(settings.collaborators),
                         action_words=set(settings.action_words) if settings.action_words else None,
                         skip_senders=set(settings.skip_senders) if settings.skip_senders else None,
-                        skip_subjects=set(settings.skip_subjects) if settings.skip_subjects else None)
+                        skip_subjects=set(settings.skip_subjects) if settings.skip_subjects else None,
+                        weights=settings.weights)
     return triage(store.all(), cfg)

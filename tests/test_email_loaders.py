@@ -129,6 +129,39 @@ def test_imap_requires_env_var_to_be_set():
         assert "COVIBER_TEST_IMAP_PW" in str(e)
 
 
+def test_message_to_record_html_only_fallback():
+    # html-only email (increasingly common) — must yield readable text, not "".
+    raw = ("From: bot@acme.com\nSubject: Falcon dashboard\n"
+           "Content-Type: text/html; charset=utf-8\n\n"
+           "<html><head><style>p{color:red}</style>"
+           "<script>alert('x')</script></head>"
+           "<body><h1>Falcon</h1><p>Deploy is <b>green</b> &amp; ready.</p>"
+           "<p>See <a href='/x'>dashboard</a>.</p></body></html>\n")
+    r = message_to_record(email.message_from_string(raw))
+    assert "Falcon" in r.text and "green & ready" in r.text and "dashboard" in r.text
+    assert "alert" not in r.text and "color:red" not in r.text  # script/style stripped
+    assert "<" not in r.text and "&amp;" not in r.text  # tags gone, entities unescaped
+
+
+def test_message_to_record_multipart_alternative_prefers_plain():
+    # multipart/alternative with both text/plain and text/html — plain wins.
+    m = EmailMessage()
+    m["From"] = "grace@acme.com"; m["Subject"] = "Falcon plan"
+    m.set_content("Plain-text body wins.")
+    m.add_alternative("<p>HTML body loses.</p>", subtype="html")
+    r = message_to_record(m)
+    assert "Plain-text body wins" in r.text
+    assert "HTML" not in r.text and "<p>" not in r.text
+
+
+def test_message_to_record_html_malformed_keeps_raw():
+    # Broken HTML shouldn't drop the record; keep something searchable.
+    raw = ("From: bot@acme.com\nContent-Type: text/html\n\n"
+           "<p>unterminated <b>bold text\n")
+    r = message_to_record(email.message_from_string(raw))
+    assert "bold text" in r.text  # tags stripped best-effort
+
+
 def test_mbox_end_to_end_pipeline():
     with tempfile.TemporaryDirectory() as d:
         s = Settings(loader="mbox", loader_config={"path": _make_mbox(d)},
@@ -148,6 +181,9 @@ _ALL = [test_email_loaders_registered, test_mbox_loader_maps_fields,
         test_mbox_limit_takes_newest_first, test_mbox_requires_path,
         test_message_to_record_edge_cases, test_imap_rejects_plaintext_password,
         test_imap_lists_missing_config, test_imap_requires_env_var_to_be_set,
+        test_message_to_record_html_only_fallback,
+        test_message_to_record_multipart_alternative_prefers_plain,
+        test_message_to_record_html_malformed_keeps_raw,
         test_mbox_end_to_end_pipeline]
 
 if __name__ == "__main__":

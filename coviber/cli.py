@@ -5,7 +5,7 @@ import argparse
 import json
 import sys
 
-from .config import read_config
+from .config import ConfigError, read_config
 from .loaders import available
 from .pipeline import Settings, build_queue, ingest
 from .store import Store
@@ -137,7 +137,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    args.func(args)
+    try:
+        args.func(args)
+    except ConfigError as e:
+        sys.exit(str(e))
 
 
 def cmd_serve(args):
