@@ -11,3 +11,4 @@ coviber_data/
 .claude/settings.local.json
 # local-only pre-push scan; holds a private token list — never commit it
 .gate-scan.sh
+.claude/worktrees/

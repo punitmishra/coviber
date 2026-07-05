@@ -59,4 +59,4 @@ def _load_entrypoints():
 
 
 # Import built-ins so they register.
-from . import demo, jsonl, webscrape  # noqa: E402,F401
+from . import demo, jsonl, slackexport, webscrape  # noqa: E402,F401
