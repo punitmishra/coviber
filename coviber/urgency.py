@@ -76,7 +76,7 @@ def _age_hours(r: Record) -> float:
 
 
 def score(r: Record, cfg: Config) -> tuple[int, list[str]]:
-    """Return (urgency in [0,15], list of signals fired)."""
+    """Return (urgency in [0,14], list of signals fired) — 14 = every signal at once."""
     signals: list[str] = []
     text = (r.text or "")
     blob = f"{(r.subject or '')} {text}".lower()
@@ -102,7 +102,7 @@ def score(r: Record, cfg: Config) -> tuple[int, list[str]]:
         u += 2; signals.append("age>48h+2")
     elif age > 24:
         u += 1; signals.append("age>24h+1")
-    return min(u, 15), signals
+    return min(u, 14), signals
 
 
 def triage(records, cfg: Config) -> list[dict]:

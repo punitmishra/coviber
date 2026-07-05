@@ -49,8 +49,9 @@ urgency → search → MCP) is loader-agnostic.
 ```
 
 Built-in loaders: **`demo`** (synthetic, zero-setup), **`jsonl`** (universal),
-**`webscrape`** (config-driven CSS selectors — no per-site code), **`mbox`** /
-**`imap`** (email, pure stdlib).
+**`mbox`** / **`imap`** (email, pure stdlib), **`slackexport`** (Slack workspace
+export dir, pure stdlib), **`webscrape`** (config-driven CSS selectors — no
+per-site code).
 
 ## Quickstart (30 seconds)
 
@@ -70,11 +71,15 @@ Point your MCP client at the local server — done. No account, no cloud, no tel
     "coviber": {
       "command": "coviber",
       "args": ["serve", "--data-dir", "~/.coviber"],
-      "env": { "COVIBER_YOU": "you" }
+      "env": { "COVIBER_YOU": "you", "COVIBER_CONFIG": "~/.coviber/config.yaml" }
     }
   }
 }
 ```
+
+`COVIBER_CONFIG` points the server at the same YAML/JSON settings file the CLI
+takes, so `catch_me_up` scores with your `priority_senders`, `collaborators`,
+`known_projects`, and skip rules — identical to `coviber triage --config`.
 
 MCP tools exposed: `recall` (semantic search), `catch_me_up` (urgency queue),
 `who_is` / `project_status` / `graph_summary` (work graph), `voice_profile`
@@ -141,6 +146,12 @@ config:
 COVIBER_IMAP_PASSWORD=... coviber ingest --config imap.yaml
 ```
 
+**Slack workspace export** (the zip Slack gives you, extracted):
+
+```bash
+coviber ingest --loader slackexport --path ~/slack-export   # YAML config adds: channels: [...], you: "your name"
+```
+
 **Scrape a page** (structure lives in config, not code):
 
 ```bash
@@ -175,7 +186,7 @@ imap = "my_pkg.imap:ImapLoader"
 |-----------|--------------|
 | **Loader** | Source → canonical `Record` stream. The swappable seam. |
 | **WorkGraph** | Incremental entity extraction (people/projects/channels/tickets) with bidirectional links — O(1) per record. |
-| **Urgency** | `U(r) ∈ [0,15]` from @mentions, priority senders, action words, questions, unread, no-reply, collaborators, and age; plus a skip filter for bots/newsletters/FYI. |
+| **Urgency** | `U(r) ∈ [0,14]` from @mentions, priority senders, action words, questions, unread, no-reply, collaborators, and age; plus a skip filter for bots/newsletters/FYI. |
 | **Store** | Content-hash dedup (re-ingest = update, not duplicate) + local embeddings/cosine search. |
 
 ## Benchmarks (reproducible on the synthetic corpus)
@@ -189,9 +200,11 @@ imap = "my_pkg.imap:ImapLoader"
 | urgency triage (full scan) | 7 ms | 298,000 rec/s |
 | semantic search (top-8) | ~900 ms* | — |
 
-\* the zero-dependency store re-encodes records per query (upper bound); a
-persisted embedding index removes this. Numbers scale with `--scale` and
-hardware — reproduce them yourself, no unverifiable claims. See [DATASHEET](DATASHEET.md).
+\* measured before the persisted index landed, when the store re-encoded every
+record per query — treat it as the cold-start upper bound. Vectors now persist
+in `embeddings.json` and only new records are encoded, so warm queries skip
+record encoding entirely; we haven't published a warm number — run the bench
+yourself. Numbers scale with `--scale` and hardware. See [DATASHEET](DATASHEET.md).
 
 ## Design principles
 - **Local-first** — records, graph, and vectors stay on disk. No data leaves your machine.
