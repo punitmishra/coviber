@@ -64,3 +64,47 @@ class MyAppLoader(Loader):
             yield Record(source="myapp", from_name=row.author, text=row.body)
 ```
 Then `coviber ingest --loader myapp` and the graph/triage/recall/MCP all light up.
+
+## Configuration reference
+The full env-var and config-file surface, in one place. Precedence:
+CLI flags → environment → `COVIBER_CONFIG` YAML/JSON → dataclass defaults.
+
+| Env var                     | Config-file key       | Default              | Notes                                                              |
+|-----------------------------|-----------------------|----------------------|--------------------------------------------------------------------|
+| `COVIBER_CONFIG`            | *(loads the file)*    | *(none)*             | Path to a YAML/JSON settings file, honored by both CLI and MCP.    |
+| `COVIBER_DATA_DIR`          | `data_dir`            | `./coviber_data`     | Store root; `~` is expanded from every source.                     |
+| `COVIBER_YOU`               | `you`                 | `you`                | Identity for `@you` mentions and self-authored filtering.          |
+| `COVIBER_QDRANT_URL`        | `qdrant.url`          | *(none)*             | Set → Qdrant backend; unset → default JSON vector store.           |
+| `COVIBER_QDRANT_COLLECTION` | `qdrant.collection`   | `coviber_records`    | Qdrant collection name.                                            |
+| `COVIBER_QDRANT_API_KEY`    | `qdrant.api_key`      | *(none)*             | Credentials in env, not config; the YAML parser does no `${VAR}` expansion. |
+| *(loader-defined)*          | `loader.password_env` | *(none)*             | The IMAP loader's contract: config names the env var it reads the password from — the secret itself never lives in config. |
+
+## Invariants (accepted design choices)
+
+These are deliberate architectural choices that surfaced in reviews. Documented
+here so contributors don't relitigate them on a hunch.
+
+- **Content-hash id excludes `channel`, `ts`, and mutable state** (`replied`,
+  `unread`). Re-scraping the same message dedups by design; the tradeoff is
+  that a genuinely-recurring identical message (a CI bot's daily "build passed")
+  collapses to one record. Per-loader granularity is the escape hatch (issue #17).
+- **No lock is held across the full `ingest()` cycle.** The advisory
+  `_write_lock` covers each `Store.upsert` / `save_graph` write, not the whole
+  load→store→graph pipeline. Two concurrent ingests on the same data_dir will
+  interleave safely at the write boundaries; they will *not* observe a
+  transactional "all of my records then all of yours" view. Not a bug — a design
+  point that keeps ingest latency low.
+- **Records are stored verbatim.** `records.jsonl` contains the raw scraped
+  and email content with no secret-scanner / PII-redactor pass. This is
+  consistent with "local-first, on your machine" — nothing leaves the box —
+  but it means an operator sharing their `data_dir` (backup, sync, screen-share)
+  is sharing everything in it. Encrypt the volume if that matters.
+- **Config is re-read on every MCP tool call.** `_settings()` is invoked at
+  the top of every tool function; a `COVIBER_CONFIG` edit takes effect on
+  the next call, without a server restart. A broken config file fails the
+  individual tool call (via `ConfigError`) — it does not kill the server.
+  Don't add a module-level settings cache thinking you're optimizing.
+- **Python matrix.** CI tests 3.9 / 3.11 / 3.13 — three points across the
+  supported range. 3.10 and 3.12 are supported by pyproject's `>=3.9` floor
+  but not tested each PR. Bump manually when a version-specific report comes
+  in.

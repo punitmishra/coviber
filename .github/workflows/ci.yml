@@ -53,7 +53,7 @@ jobs:
         run: coviber demo
 
   mcp:
-    name: mcp server registers 7 tools
+    name: mcp tools register with expected names
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -64,12 +64,18 @@ jobs:
       - name: full test suite with the mcp extra (runs the mcp-gated tests)
         run: python -m pytest tests/ -v
       - name: tool registration smoke test
+        # Name-set assertion, not a magic count: any accidental rename or
+        # drop shows up in the diff, and adding a tool prompts an explicit
+        # update to the expected set. See test_mcp_config for per-tool
+        # coverage.
         run: |
           python -c "
           import asyncio
           from coviber.mcp_server import mcp
           tools = asyncio.run(mcp.list_tools())
-          names = sorted(t.name for t in tools)
-          assert len(tools) == 7, names
-          print('registered:', names)
+          got = {t.name for t in tools}
+          expected = {'recall', 'catch_me_up', 'who_is', 'project_status',
+                      'graph_summary', 'voice_profile', 'refresh'}
+          assert got == expected, f'MCP tool set drift: missing={expected - got}, extra={got - expected}'
+          print('registered:', sorted(got))
           "

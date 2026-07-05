@@ -338,9 +338,38 @@ def resolve(data_dir: Path, model_tag: str, *, qdrant: dict | None = None) -> Ve
     url = cfg.get("url") or os.environ.get("COVIBER_QDRANT_URL")
     if not url:
         return JSONVectorStore(data_dir, model_tag=model_tag)
+    # Local-first invariant enforcement: warn to stderr when the Qdrant URL
+    # points somewhere other than loopback so a copy-pasted managed-cluster
+    # URL doesn't silently ship embeddings off-device. Not fatal — remote
+    # Qdrant is a legitimate power-user configuration — but must be visible.
+    _warn_if_remote_qdrant(url)
     return QdrantVectorStore(
         data_dir, model_tag=model_tag, url=url,
         collection=cfg.get("collection") or os.environ.get("COVIBER_QDRANT_COLLECTION", "coviber_records"),
         api_key=cfg.get("api_key") or os.environ.get("COVIBER_QDRANT_API_KEY"),
         dim=int(cfg.get("dim", 384)),
     )
+
+
+def _warn_if_remote_qdrant(url: str) -> None:
+    """Print a one-line stderr note if the URL doesn't resolve to loopback.
+
+    We check the hostname textually (localhost / 127.x.x.x / [::1]) — DNS
+    lookups here would be surprising side-effect at Store construction time
+    and would fail in offline test environments. A remote host that happens
+    to be an IP in loopback range is a footgun we accept in exchange for
+    zero network dependency on resolver construction.
+    """
+    try:
+        from urllib.parse import urlparse
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return
+    loopback_prefixes = ("localhost", "127.", "0.0.0.0", "::1", "[::1]")
+    if host and not any(host == "localhost" or host.startswith(p) for p in loopback_prefixes):
+        print(
+            f"coviber: Qdrant URL '{url}' appears remote (host='{host}'); "
+            "vectors will be sent off-device. Set COVIBER_QDRANT_URL to a local "
+            "Docker (see docker-compose.yml) to keep the local-first invariant.",
+            file=sys.stderr,
+        )
