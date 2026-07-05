@@ -137,12 +137,37 @@ Configuration goes through `qdrant:` in the settings file for reproducibility:
 qdrant:
   url: http://localhost:6333
   collection: coviber_records   # default
-  api_key: ${QDRANT_API_KEY}    # optional; can also set COVIBER_QDRANT_API_KEY
+  # api_key: put credentials in COVIBER_QDRANT_API_KEY, not the config file
 ```
+
+The config parser does not perform shell-style `${VAR}` interpolation —
+put credentials in `COVIBER_QDRANT_API_KEY` and leave the YAML clean.
+Any non-loopback URL will print a stderr warning at startup so a
+copy-pasted managed-cluster URL doesn't silently exfiltrate embeddings.
 
 Delete `./data/qdrant/` (or call `store._vectors.wipe()`) to reset the index.
 Switching between backends is safe — model tags are persisted per backend, so
 each rebuilds its own index the first time it runs.
+
+### Configuration reference
+
+Every configurable value has one canonical config-file key and, for a few
+runtime overrides, an environment variable. Precedence: CLI flags →
+env → config file → dataclass defaults.
+
+| Env var                    | Config file key       | Default              | Notes                                                              |
+|----------------------------|-----------------------|----------------------|--------------------------------------------------------------------|
+| `COVIBER_CONFIG`           | *(loads the file)*    | *(none)*             | Path to a YAML/JSON settings file, honored by both CLI and MCP.    |
+| `COVIBER_DATA_DIR`         | `data_dir`            | `./coviber_data`     | Where `records.jsonl` / `embeddings.json` / `workgraph.json` live. |
+| `COVIBER_YOU`              | `you`                 | `you`                | The identity `@you` mentions match against and self-authored dedup. |
+| `COVIBER_QDRANT_URL`       | `qdrant.url`          | *(none)*             | Set → Qdrant backend; unset → default JSON vector store.           |
+| `COVIBER_QDRANT_COLLECTION`| `qdrant.collection`   | `coviber_records`    | Qdrant collection name.                                            |
+| `COVIBER_QDRANT_API_KEY`   | `qdrant.api_key`      | *(none)*             | Credentials belong in env; the YAML file does no `${VAR}` expansion. |
+| `COVIBER_IMAP_PASSWORD`*   | `loader.password_env` | *(none)*             | *IMAP secrets never live in config: set `password_env` to the env-var name.* |
+
+*The IMAP loader's contract is "the config file names an env var it reads
+the password from" — `COVIBER_IMAP_PASSWORD` is the conventional name but
+any env var works.
 
 ## Use your own data
 

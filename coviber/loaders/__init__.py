@@ -54,8 +54,21 @@ def _load_entrypoints():
     for ep in eps:
         try:
             ep.load()  # importing the module runs its @register
-        except Exception:
-            pass
+        except Exception as exc:
+            # Fail-open on plugin load errors so an uninstalled optional-extra
+            # entry-point (or a temporarily-broken third-party plugin) doesn't
+            # take out the whole registry. But surface the failure so a
+            # third-party author sees WHY their plugin didn't register —
+            # marketing "write your own loader in ~10 lines" means the
+            # extension seam must be observable when it silently fails.
+            import warnings
+            ep_name = getattr(ep, "name", "?")
+            ep_value = getattr(ep, "value", "?")
+            warnings.warn(
+                f"coviber: entry-point '{ep_name}' -> '{ep_value}' failed to load "
+                f"({type(exc).__name__}: {exc})",
+                RuntimeWarning, stacklevel=2,
+            )
 
 
 # Import built-ins so they register.

@@ -68,6 +68,19 @@ def test_dynamic_signal_labels_reflect_weight():
     assert "unread+7" in signals  # label rendered from the live weight
 
 
+def test_custom_weights_change_ceiling_without_clamp():
+    """The score function no longer applies a magic 14-cap. Callers who
+    boost weights must expect proportionally higher scores; downstream
+    renderers (e.g. the CLI's `🔴` bar) are responsible for their own
+    presentation caps (audit2/#21)."""
+    cfg = Config(you="you", weights={"mention": 100, "unread": 50})
+    r = Record(source="s", from_name="A", unread=True, text="@you please review?")
+    u, _ = score(r, cfg)
+    assert u >= 100  # mention alone exceeds the historical 14 ceiling
+    # And the sum-of-fired-weights invariant still holds — no runaway growth.
+    assert u <= sum(cfg.weights.values())
+
+
 # --- audit L5 findings ---------------------------------------------------
 
 
