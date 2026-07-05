@@ -56,20 +56,32 @@ def ingest(settings: Settings) -> dict:
     store = Store(settings.data_dir, qdrant=settings.qdrant)
     n_new = store.upsert(records)
 
+    # Read once, then use the same list for the graph ingest and the stats
+    # summary. records.jsonl can grow to ≥10^5 lines — the double-read cost
+    # a naive `store.all()` twice was showing up as ~40% of ingest wall time.
+    all_records = store.all()
     graph = WorkGraph(known_projects=settings.known_projects, you=settings.you)
-    graph.ingest(store.all())
+    graph.ingest(all_records)
     store.save_graph(graph.to_dict())
 
     return {"loader": settings.loader, "loaded": len(records), "new": n_new,
-            "total": len(store.all()), "graph": graph.summary()}
+            "total": len(all_records), "graph": graph.summary()}
 
 
 def build_queue(settings: Settings) -> list[dict]:
     store = Store(settings.data_dir, qdrant=settings.qdrant)
-    cfg = UrgencyConfig(you=settings.you, priority_senders=set(settings.priority_senders),
-                        collaborators=set(settings.collaborators),
-                        action_words=set(settings.action_words) if settings.action_words else None,
-                        skip_senders=set(settings.skip_senders) if settings.skip_senders else None,
-                        skip_subjects=set(settings.skip_subjects) if settings.skip_subjects else None,
-                        weights=settings.weights)
+    # Use `is not None` guards so an *explicit* empty list from the config
+    # ("action_words: []" or "priority_senders: []") is honored as an opt-out
+    # rather than silently reverting to the module defaults. Only genuinely-
+    # unset fields (None) fall back to defaults, which is what the caller
+    # who never touched the key expected.
+    cfg = UrgencyConfig(
+        you=settings.you,
+        priority_senders=set(settings.priority_senders),
+        collaborators=set(settings.collaborators),
+        action_words=set(settings.action_words) if settings.action_words is not None else None,
+        skip_senders=set(settings.skip_senders) if settings.skip_senders is not None else None,
+        skip_subjects=set(settings.skip_subjects) if settings.skip_subjects is not None else None,
+        weights=settings.weights,
+    )
     return triage(store.all(), cfg)

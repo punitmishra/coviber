@@ -66,9 +66,23 @@ class WebScrapeLoader(Loader):
             req = urllib.request.Request(url, headers=self.config.get("headers", {"User-Agent": "coviber/0.1"}))
             with urllib.request.urlopen(req, timeout=self.config.get("timeout", 20)) as resp:
                 html = resp.read().decode("utf-8", "replace")
-        elif html.strip().endswith(".html"):
+        else:
+            # `html` may be either the inline document or a path to a file.
+            # The old suffix heuristic (`.endswith(".html")`) misfired both
+            # ways: `<a href="/x.html">` inline HTML was treated as a path
+            # (FileNotFoundError), and `/tmp/page.htm` never was. Detect a
+            # file by existence — if the stripped string is a real file,
+            # read it; otherwise treat as inline. `.is_file()` on paths
+            # containing '\n' returns False on POSIX (no valid filename has
+            # a newline), so multi-line inline HTML is safe.
             from pathlib import Path
-            html = Path(html).read_text(encoding="utf-8")
+            trimmed = html.strip()
+            try:
+                looks_like_path = len(trimmed) <= 4096 and Path(trimmed).is_file()
+            except (OSError, ValueError):  # path too long, embedded nulls, etc.
+                looks_like_path = False
+            if looks_like_path:
+                html = Path(trimmed).read_text(encoding="utf-8")
 
         soup = BeautifulSoup(html, "html.parser")
         source = self.config.get("source", "web")

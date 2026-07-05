@@ -41,14 +41,15 @@ def test_last_seen_chronological_across_formats():
     for batch in ([older, newer], [newer, older]):  # raw lexicographic max() would pick "Mon, ..."
         g = WorkGraph()
         g.ingest(batch)
-        assert g.people["Ada"]["last_seen"] == "2025-06-01T00:00:00+00:00"
+        # Post-L4: keys are lowercased in the graph.
+        assert g.people["ada"]["last_seen"] == "2025-06-01T00:00:00+00:00"
 
 
 def test_unparseable_ts_never_clobbers_last_seen():
     g = WorkGraph()
     g.ingest([Record(source="slack", from_name="Ada", ts="2025-06-01T00:00:00+00:00"),
               Record(source="slack", from_name="Ada", ts="zzz not a date")])
-    assert g.people["Ada"]["last_seen"] == "2025-06-01T00:00:00+00:00"
+    assert g.people["ada"]["last_seen"] == "2025-06-01T00:00:00+00:00"
 
 
 def test_rfc2822_record_gets_age_signal():

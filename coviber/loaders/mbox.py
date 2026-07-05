@@ -135,12 +135,22 @@ class MboxLoader(Loader):
             raise FileNotFoundError(f"mbox loader: no file at {path}")
         source = self.config.get("source", "email")
         limit = self.config.get("limit")
+        # Reject non-positive limits so `limit: -1` in YAML doesn't silently
+        # drop the newest message (via `msgs[--1:]` == `msgs[1:]`, keeping
+        # everything except the last). The loader has no coherent
+        # "newest 0" or "newest negative-N" semantics, so fail loud.
+        if limit is not None:
+            limit = int(limit)
+            if limit <= 0:
+                raise ValueError(
+                    f"mbox loader: 'limit' must be a positive integer, got {limit}"
+                )
         box = mailbox.mbox(str(path))
         try:
             msgs = list(box)
         finally:
             box.close()
         if limit:
-            msgs = msgs[-int(limit):]
+            msgs = msgs[-limit:]
         for msg in reversed(msgs):  # mbox appends chronologically -> newest first
             yield message_to_record(msg, source=source)

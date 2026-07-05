@@ -68,6 +68,22 @@ def _get_embedder():
     return _embedder
 
 
+def _to_float32_list(v) -> list[float]:
+    """Coerce an encoder row (numpy ndarray or list of numbers) to a list of
+    float32-precision Python floats. Halves the JSON serialization width
+    versus float64 with no meaningful precision loss for a float32 model.
+    """
+    try:
+        import numpy as np
+        if isinstance(v, np.ndarray):
+            return v.astype("float32").tolist()
+        return np.asarray(v, dtype="float32").tolist()
+    except ImportError:
+        # No numpy — do the round-trip via struct so we still shed precision.
+        import struct
+        return [struct.unpack("f", struct.pack("f", float(x)))[0] for x in v]
+
+
 class Store:
     def __init__(self, data_dir: str | Path = "./coviber_data", *,
                  vectors: VectorStore | None = None, qdrant: dict | None = None):
@@ -155,9 +171,28 @@ class Store:
         try:
             ranked = self._embedding_search(query, records, limit)
             self.last_search_backend = f"embeddings ({EMBED_MODEL}) via {type(self._vectors).__name__}"
-        except Exception:
+        except ImportError:
+            # Expected fallback: [search] extra isn't installed. Silent.
             ranked = self._keyword_search(query, records)
             self.last_search_backend = "keyword"
+        except Exception as exc:
+            # Unexpected failure: extras ARE installed but something broke —
+            # CUDA OOM, HuggingFace hub 5xx on first model download, corrupt
+            # vector cache, Qdrant unreachable, numpy/torch mismatch. Fall
+            # back to keyword so the caller still gets results, but SURFACE
+            # it (stderr + warning) so an operator can tell "extras missing"
+            # (silent) apart from "extras installed but broken" (this path).
+            import warnings
+            print(f"coviber: embedding search failed "
+                  f"({type(exc).__name__}: {exc}); falling back to keyword",
+                  file=sys.stderr)
+            warnings.warn(
+                f"coviber: embedding search failed ({type(exc).__name__}: {exc}); "
+                "falling back to keyword",
+                RuntimeWarning, stacklevel=2,
+            )
+            ranked = self._keyword_search(query, records)
+            self.last_search_backend = "keyword (embedding failed)"
         return ranked[:limit]
 
     def _embedding_search(self, query: str, records: list[Record], limit: int
@@ -173,8 +208,12 @@ class Store:
             rows = emb.encode(
                 [f"{r.subject} {r.text}" for r in missing], normalize_embeddings=True,
             )
+            # `rows` may be a numpy ndarray (float32 from sentence-transformers)
+            # or a plain list (e.g. from tests' FakeEmbedder). Coerce to
+            # float32 lists in either case — float64 upcasting adds no signal
+            # vs the source model and roughly doubles JSON on-disk size.
             self._vectors.upsert(
-                [(r.id, [float(x) for x in v]) for r, v in zip(missing, rows)],
+                [(r.id, _to_float32_list(v)) for r, v in zip(missing, rows)],
             )
         if stale:
             self._vectors.delete(stale)
@@ -198,6 +237,23 @@ class Store:
         return sorted(scored, key=lambda x: -x[0])
 
     def save_graph(self, graph_dict: dict):
+        # Write-then-rename so a SIGINT / Ctrl-C / crash mid-write can't leave a
+        # torn workgraph.json — the MCP tools (who_is / project_status /
+        # graph_summary) read this file with json.loads and no fallback, so a
+        # partial write would crash every subsequent tool call until re-ingest.
+        # PID+uuid tag on the tmp path guards the theoretical case where a
+        # future caller races two ingest cycles on the same data_dir.
+        import uuid as _uuid  # local import: this method is called rarely
         with _write_lock(self.dir):
-            (self.dir / "workgraph.json").write_text(json.dumps(graph_dict, indent=2),
-                                                     encoding="utf-8")
+            target = self.dir / "workgraph.json"
+            tmp = target.with_suffix(f".json.tmp.{os.getpid()}.{_uuid.uuid4().hex[:8]}")
+            try:
+                tmp.write_text(json.dumps(graph_dict, indent=2), encoding="utf-8")
+                os.replace(tmp, target)
+            except Exception:
+                if tmp.exists():
+                    try:
+                        tmp.unlink()
+                    except OSError:
+                        pass
+                raise
