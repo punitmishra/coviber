@@ -287,7 +287,7 @@ issue [#18](https://github.com/punitmishra/coviber/issues/18)
 - **MCP-native** — exposes context to an LLM via the Model Context Protocol.
 
 ## Docs
-[Architecture](ARCHITECTURE.md) · [Whitepaper](WHITEPAPER.md) · [Datasheet](DATASHEET.md) · [Contributing](CONTRIBUTING.md)
+[Architecture](ARCHITECTURE.md) · [Whitepaper](WHITEPAPER.md) · [Datasheet](DATASHEET.md) · [Roadmap](ROADMAP.md) · [Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md)
 
 ## Status & license
 v0.5 — a clean-room build on 100% synthetic data (see [DATASHEET](DATASHEET.md)).
