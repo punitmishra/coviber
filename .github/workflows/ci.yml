@@ -52,6 +52,56 @@ jobs:
       - name: demo works on stdlib alone
         run: coviber demo
 
+  search:
+    name: search extra (sentence-transformers embeddings)
+    # Exercises the real embedding path — without this job, `search` extra
+    # bit-rot lands in a release and only surfaces when a user tries it.
+    # #42 flagged this gap in the v0.5 architect audit.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # sentence-transformers pulls torch (~200MB) — cache the pip download
+      # dir so this job stays under a minute after the first warm run.
+      - name: cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-search-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}
+      - run: pip install -e ".[search,scrape]" pytest
+      - name: full suite with the embedding path exercised
+        run: python -m pytest tests/ -v
+      - name: embedded search smoke test on the demo corpus
+        run: |
+          coviber demo
+          coviber query "Falcon launch" -k 3
+
+  qdrant:
+    name: qdrant extra (client import + fake-server tests)
+    # Doesn't spin up a real Qdrant service — the fake-client tests in
+    # test_vector_stores.py cover the coviber glue. The important thing
+    # this job protects is the qdrant-client import path itself:
+    # a version bump that breaks our resolve() wiring shows up here.
+    # #42 flagged the coverage gap.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-qdrant-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}
+      - run: pip install -e ".[qdrant,scrape]" pytest
+      - name: full suite with qdrant-client importable
+        run: python -m pytest tests/ -v
+      - name: verify the [qdrant] extra actually provides qdrant-client
+        run: python -c "from qdrant_client import QdrantClient; print('qdrant-client ok')"
+
   mcp:
     name: mcp tools register with expected names
     runs-on: ubuntu-latest
