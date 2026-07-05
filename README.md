@@ -245,20 +245,39 @@ mycrm = "my_pkg.crm:MyCrmLoader"
 
 ## Benchmarks (reproducible on the synthetic corpus)
 
-`python bench/run.py --scale 2000` — median of repeats, single core:
+`python bench/run.py --scales 1000,10000,100000` — median of repeats,
+single core, JSON persistence, keyword search backend:
 
-| stage | latency | throughput |
-|-------|--------:|-----------:|
-| ingest + dedup | 42 ms | 47,000 rec/s |
-| work-graph build | 8 ms | 262,000 rec/s |
-| urgency triage (full scan) | 7 ms | 298,000 rec/s |
-| semantic search (top-8) | ~900 ms* | — |
+| scale | ingest + dedup | graph build | urgency triage | search (cold / warm) |
+|------:|---------------:|------------:|---------------:|---------------------:|
+| 1 000    | 32 ms   | 12 ms   | 11 ms  | 8 ms / 7 ms |
+| 10 000   | 194 ms  | 124 ms  | 103 ms | 73 ms / 71 ms |
+| 100 000  | 1 848 ms | 1 327 ms | 1 076 ms | 739 ms / 760 ms |
 
-\* measured before the persisted index landed, when the store re-encoded every
-record per query — treat it as the cold-start upper bound. Vectors now persist
-in `embeddings.json` and only new records are encoded, so warm queries skip
-record encoding entirely; we haven't published a warm number — run the bench
-yourself. Numbers scale with `--scale` and hardware. See [DATASHEET](DATASHEET.md).
+`python bench/run.py --scales 1000,10000 --search-mode auto` — with the
+`[search]` extra installed (sentence-transformers `all-MiniLM-L6-v2`,
+384-dim, JSONVectorStore backend):
+
+| scale | search cold | search warm |
+|------:|------------:|------------:|
+| 1 000  | 27 s* | 196 ms |
+| 10 000 | 6.6 s | 1.3 s |
+
+\* first cold call downloads the encoder model — subtract that. Warm
+numbers are what a real user sees.
+
+Every number above is written to `bench/results/*.json` alongside a git
+sha and hardware fingerprint, so releases can bisect regressions. See
+[bench/run.py](bench/run.py) for the harness and [DATASHEET](DATASHEET.md)
+for the corpus. Reproduce yours with:
+
+```bash
+python bench/run.py --scales 1000,10000,100000 --output bench/results/mine.json
+```
+
+The 100 000-record graph rebuild at 1.3 s per ingest is the source of
+issue [#18](https://github.com/punitmishra/coviber/issues/18)
+(incremental updates) — the numbers exist to be improved.
 
 ## Design principles
 - **Local-first** — records, graph, and vectors stay on disk. No data leaves your machine.

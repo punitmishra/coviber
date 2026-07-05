@@ -1,0 +1,37 @@
+{
+  "git_sha": "b5761d2",
+  "hardware": {
+    "platform": "macOS-26.5.1-arm64-arm-64bit",
+    "machine": "arm64",
+    "processor": "arm",
+    "python": "3.10.18"
+  },
+  "search_mode": "auto",
+  "results": [
+    {
+      "scale": 1000,
+      "ingest_ms": 32.18,
+      "ingest_throughput_rec_per_s": 31079,
+      "graph_ms": 11.84,
+      "graph_throughput_rec_per_s": 84455,
+      "triage_ms": 10.2,
+      "triage_throughput_rec_per_s": 98069,
+      "search_cold_ms": 27454.26,
+      "search_warm_ms": 196.1,
+      "search_backend": "embeddings (all-MiniLM-L6-v2) via JSONVectorStore"
+    },
+    {
+      "scale": 10000,
+      "ingest_ms": 190.69,
+      "ingest_throughput_rec_per_s": 52441,
+      "graph_ms": 123.46,
+      "graph_throughput_rec_per_s": 81000,
+      "triage_ms": 103.52,
+      "triage_throughput_rec_per_s": 96602,
+      "search_cold_ms": 6554.9,
+      "search_warm_ms": 1295.13,
+      "search_backend": "embeddings (all-MiniLM-L6-v2) via JSONVectorStore"
+    }
+  ],
+  "schema_version": "1.0"
+}
