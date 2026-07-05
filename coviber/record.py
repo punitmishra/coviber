@@ -4,7 +4,6 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
-from typing import Optional
 
 
 def _now() -> str:
@@ -12,7 +11,10 @@ def _now() -> str:
 
 
 def _hash(*parts: str) -> str:
-    return hashlib.md5("".join(p or "" for p in parts).encode()).hexdigest()
+    # \x1f separator keeps field boundaries unambiguous ("ab"+"c" != "a"+"bc");
+    # usedforsecurity=False keeps FIPS-mode Pythons happy (md5 is only a dedup key).
+    data = "\x1f".join(p or "" for p in parts).encode("utf-8")
+    return hashlib.md5(data, usedforsecurity=False).hexdigest()
 
 
 @dataclass

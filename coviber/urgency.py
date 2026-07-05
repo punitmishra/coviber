@@ -55,7 +55,8 @@ def should_skip(r: Record, cfg: Config) -> Optional[str]:
     sender = (r.from_name or "").lower()
     subject = (r.subject or "").lower()
     blob = f"{subject} {(r.text or '').lower()}"
-    if any(s in sender for s in cfg.skip_senders):
+    # token-boundary match: "acme-ci-bot" skips, a colleague named "Abbott" doesn't
+    if any(re.search(rf"(?<![a-z0-9]){re.escape(s)}(?![a-z0-9])", sender) for s in cfg.skip_senders):
         return "skip-sender"
     if any(s in subject for s in cfg.skip_subjects):
         return "skip-subject"
@@ -105,9 +106,12 @@ def score(r: Record, cfg: Config) -> tuple[int, list[str]]:
 
 
 def triage(records, cfg: Config) -> list[dict]:
-    """Filter (skip + zero-signal), score, and sort. Highest urgency first."""
+    """Filter (self-authored + skip + zero-signal), score, and sort. Highest urgency first."""
     out = []
+    you = (cfg.you or "").lower()
     for r in records:
+        if (r.from_name or "").lower() == you:
+            continue  # your own sent messages are not obligations
         reason = should_skip(r, cfg)
         if reason:
             continue

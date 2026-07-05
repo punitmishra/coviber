@@ -37,7 +37,10 @@ def _extract(el, spec: dict) -> str:
     attr = spec.get("attr", "text")
     if attr == "text":
         return node.get_text(" ", strip=True)
-    return (node.get(attr) or "").strip()
+    val = node.get(attr) or ""
+    if isinstance(val, list):  # multi-valued attributes like class
+        val = " ".join(val)
+    return val.strip()
 
 
 @register("webscrape")
@@ -56,14 +59,16 @@ class WebScrapeLoader(Loader):
 
         html = self.config.get("html")
         if not html:
+            url = self.config.get("url")
+            if not url:
+                raise ValueError("webscrape loader needs 'url' or 'html' in config")
             import urllib.request
-            url = self.config["url"]
             req = urllib.request.Request(url, headers=self.config.get("headers", {"User-Agent": "coviber/0.1"}))
             with urllib.request.urlopen(req, timeout=self.config.get("timeout", 20)) as resp:
                 html = resp.read().decode("utf-8", "replace")
         elif html.strip().endswith(".html"):
             from pathlib import Path
-            html = Path(html).read_text()
+            html = Path(html).read_text(encoding="utf-8")
 
         soup = BeautifulSoup(html, "html.parser")
         source = self.config.get("source", "web")
@@ -75,8 +80,8 @@ class WebScrapeLoader(Loader):
             data = {"source": source}
             for field_name, spec in fields.items():
                 data[field_name] = _extract(el, spec)
-            # relative -> absolute url
-            if data.get("url") and base_url and data["url"].startswith("/"):
+            # relative -> absolute url (urljoin handles absolute, /abs, and doc-relative forms)
+            if data.get("url") and base_url:
                 from urllib.parse import urljoin
                 data["url"] = urljoin(base_url, data["url"])
             if data.get("subject") or data.get("text"):

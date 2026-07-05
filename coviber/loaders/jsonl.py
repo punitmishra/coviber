@@ -24,11 +24,16 @@ class JsonlLoader(Loader):
         if not path.exists():
             raise FileNotFoundError(f"jsonl loader: no file at {path}")
         default_source = self.config.get("source", "jsonl")
-        with path.open() as f:
-            for line in f:
+        with path.open(encoding="utf-8") as f:
+            for lineno, line in enumerate(f, 1):
                 line = line.strip()
                 if not line:
                     continue
-                obj = json.loads(line)
-                obj.setdefault("source", default_source)
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError as e:
+                    raise ValueError(f"{path}:{lineno}: invalid JSON: {e}") from e
+                if not isinstance(obj, dict):
+                    raise ValueError(f"{path}:{lineno}: expected a JSON object, got {type(obj).__name__}")
+                obj["source"] = obj.get("source") or default_source  # also catches explicit null
                 yield Record.from_dict(obj)

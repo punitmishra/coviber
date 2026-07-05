@@ -103,8 +103,9 @@ def voice_profile() -> str:
     """Your inference-free writing-voice profile + a ready system prompt for drafting
     in your style, learned locally from records you authored (from_name == 'you')."""
     you = os.environ.get("COVIBER_YOU", "you").lower()
-    mine = [f"{r.subject}\n{r.text}" for r in Store(DATA_DIR).all()
-            if (r.from_name or "").lower() == you]
+    # body only — a leading subject line would defeat the persona engine's opener detection
+    mine = [r.text for r in Store(DATA_DIR).all()
+            if (r.from_name or "").lower() == you and r.text]
     if not mine:
         return ("No self-authored messages found in local memory. Set from_name to your "
                 "identity when ingesting so the persona engine can learn your voice.")
@@ -114,9 +115,10 @@ def voice_profile() -> str:
 
 
 @mcp.tool()
-def refresh(loader: str = "demo", path: str = "") -> str:
-    """Ingest fresh context via a loader (default: the built-in synthetic demo).
-    Use loader='jsonl' with a path, or any registered loader."""
+def refresh(loader: str, path: str = "") -> str:
+    """Ingest fresh context via a named loader — loader='jsonl' with a path, or any
+    registered loader. Pass loader='demo' explicitly to load the synthetic demo corpus
+    (it mixes fictional records into your real store; use a scratch data dir)."""
     cfg = {"path": path} if path else {}
     stats = ingest(Settings(loader=loader, loader_config=cfg, data_dir=DATA_DIR,
                             you=os.environ.get("COVIBER_YOU", "you")))

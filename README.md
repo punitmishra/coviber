@@ -87,8 +87,8 @@ coviber demo              # ingest synthetic data → show graph + triage
 ```
 
 ```
-loader=demo  loaded=12  new=12  total=12
-graph: 7 people · 3 projects · 7 channels · 4 tickets
+loader=demo  loaded=15  new=15  total=15
+graph: 7 people · 3 projects · 8 channels · 4 tickets
 projects: Atlas, Falcon, Orbit
 
 # Triage — 8 actionable item(s)
@@ -96,7 +96,8 @@ projects: Atlas, Falcon, Orbit
      Re: Falcon launch sign-off needed
      signals: priority-sender+2, action-word+2, question+1, unread+1
 2. [ 5] 🔴🔴🔴🔴🔴  Linus Vega · slack/dm
-     @mention+3, question+1, collaborator+1
+     DM: Linus Vega
+     signals: @mention+3, question+1, collaborator+1
 ...
 ```
 

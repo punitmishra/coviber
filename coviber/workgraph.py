@@ -13,8 +13,10 @@ from typing import Iterable
 from .record import Record
 
 # Generic ticket / PR / issue identifiers: ABC-1234, PR #12, #4567
-DEFAULT_TICKET_RE = re.compile(r"\b([A-Z][A-Z0-9]+-\d+|PR\s*#\d+|#\d{3,})\b")
-MENTION_RE = re.compile(r"@([A-Za-z0-9_.-]+)")
+# (the bare-# branch needs a lookbehind — \b can't sit between whitespace and '#')
+DEFAULT_TICKET_RE = re.compile(r"(\b[A-Z][A-Z0-9]+-\d+\b|\bPR\s*#\d+\b|(?<![\w#])#\d{3,}\b)")
+# lookbehind rejects email addresses; the tail can't end in '.' or '-'
+MENTION_RE = re.compile(r"(?<![\w.])@([A-Za-z0-9_](?:[A-Za-z0-9_.-]*[A-Za-z0-9_])?)")
 
 
 class WorkGraph:
@@ -33,9 +35,10 @@ class WorkGraph:
 
     def _ingest_one(self, r: Record):
         blob = f"{r.subject} {r.text}"
+        you = self.you.lower()
         people = set(filter(None, [r.from_name, r.recipient]))
-        people |= {m for m in MENTION_RE.findall(r.text) if m.lower() != self.you}
-        people.discard(self.you)
+        people |= set(MENTION_RE.findall(r.text))
+        people = {p for p in people if p.lower() != you}
         projects = {p for p in self.known_projects if p.lower() in blob.lower()}
         channels = {r.channel} if r.channel else set()
         tickets = {m if isinstance(m, str) else m[0] for m in self.ticket_re.findall(f"{blob} {r.url}")}

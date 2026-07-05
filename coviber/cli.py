@@ -76,12 +76,12 @@ def cmd_graph(args):
     gp = store.dir / "workgraph.json"
     if not gp.exists():
         print("no graph yet — run `coviber ingest`."); return
-    g = json.loads(gp.read_text())
+    g = json.loads(gp.read_text(encoding="utf-8"))
     if args.person:
         print(json.dumps(g["people"].get(args.person, {"error": "not found"}), indent=2)); return
     print(json.dumps({"people": len(g["people"]), "projects": len(g["projects"]),
-                      "tickets": len(g["tickets"]),
-                      "people_list": sorted(g["people"]), "projects": sorted(g["projects"])}, indent=2))
+                      "channels": len(g["channels"]), "tickets": len(g["tickets"]),
+                      "people_list": sorted(g["people"]), "projects_list": sorted(g["projects"])}, indent=2))
 
 
 def cmd_demo(args):
@@ -110,43 +110,50 @@ def cmd_loaders(args):
     print("available loaders:", ", ".join(available()))
 
 
-def main(argv=None):
+def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="coviber", description="Continuous context replica for AI-augmented work.")
     p.add_argument("--data-dir", default=None, help="where to store records + graph (default ./coviber_data)")
+    # accepted before *or* after the subcommand: `coviber serve --data-dir ~/.coviber`
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--data-dir", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    ig = sub.add_parser("ingest", help="load records via a loader → store + graph")
+    ig = sub.add_parser("ingest", parents=[common], help="load records via a loader → store + graph")
     ig.add_argument("--loader", help="loader name (see `coviber loaders`)")
     ig.add_argument("--path", help="file path for the jsonl loader")
     ig.add_argument("--config", help="YAML/JSON settings file")
     ig.set_defaults(func=cmd_ingest)
 
-    tr = sub.add_parser("triage", help="show the prioritized obligation queue")
+    tr = sub.add_parser("triage", parents=[common], help="show the prioritized obligation queue")
     tr.add_argument("--config"); tr.set_defaults(func=cmd_triage)
 
-    q = sub.add_parser("query", help="semantic/keyword search over context")
+    q = sub.add_parser("query", parents=[common], help="semantic/keyword search over context")
     q.add_argument("text"); q.add_argument("-k", type=int, default=8); q.add_argument("--config")
     q.set_defaults(func=cmd_query)
 
-    gr = sub.add_parser("graph", help="inspect the work graph")
+    gr = sub.add_parser("graph", parents=[common], help="inspect the work graph")
     gr.add_argument("--person"); gr.add_argument("--config"); gr.set_defaults(func=cmd_graph)
 
-    dm = sub.add_parser("demo", help="run end-to-end on synthetic data (no setup)")
-    dm.add_argument("--config"); dm.set_defaults(func=cmd_demo)
+    dm = sub.add_parser("demo", parents=[common], help="run end-to-end on synthetic data (no setup)")
+    dm.set_defaults(func=cmd_demo)
 
     sub.add_parser("loaders", help="list available loaders").set_defaults(func=cmd_loaders)
 
-    sv = sub.add_parser("serve", help="start the local MCP server (stdio) for Claude / any MCP client")
+    sv = sub.add_parser("serve", parents=[common],
+                        help="start the local MCP server (stdio) for Claude / any MCP client")
     sv.set_defaults(func=cmd_serve)
+    return p
 
-    args = p.parse_args(argv)
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
     args.func(args)
 
 
 def cmd_serve(args):
     import os
     if args.data_dir:
-        os.environ["COVIBER_DATA_DIR"] = args.data_dir
+        os.environ["COVIBER_DATA_DIR"] = os.path.expanduser(args.data_dir)
     try:
         from .mcp_server import main as serve_main
     except ImportError:

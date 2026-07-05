@@ -7,7 +7,6 @@ pushed out to pluggable loaders instead of a hardcoded per-platform dispatch.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from .loaders import get_loader
 from .store import Store
@@ -24,6 +23,9 @@ class Settings:
     known_projects: list = field(default_factory=list)
     priority_senders: list = field(default_factory=list)
     collaborators: list = field(default_factory=list)
+    action_words: list = None       # None -> urgency defaults
+    skip_senders: list = None
+    skip_subjects: list = None
 
     @classmethod
     def from_dict(cls, d: dict) -> "Settings":
@@ -36,6 +38,9 @@ class Settings:
             known_projects=d.get("known_projects", []),
             priority_senders=d.get("priority_senders", []),
             collaborators=d.get("collaborators", []),
+            action_words=d.get("action_words"),
+            skip_senders=d.get("skip_senders"),
+            skip_subjects=d.get("skip_subjects"),
         )
 
 
@@ -58,5 +63,8 @@ def ingest(settings: Settings) -> dict:
 def build_queue(settings: Settings) -> list[dict]:
     store = Store(settings.data_dir)
     cfg = UrgencyConfig(you=settings.you, priority_senders=set(settings.priority_senders),
-                        collaborators=set(settings.collaborators))
+                        collaborators=set(settings.collaborators),
+                        action_words=set(settings.action_words) if settings.action_words else None,
+                        skip_senders=set(settings.skip_senders) if settings.skip_senders else None,
+                        skip_subjects=set(settings.skip_subjects) if settings.skip_subjects else None)
     return triage(store.all(), cfg)

@@ -15,6 +15,10 @@ _REGISTRY: dict[str, Type[Loader]] = {}
 
 def register(name: str):
     def deco(cls: Type[Loader]) -> Type[Loader]:
+        if name in _REGISTRY and _REGISTRY[name] is not cls:
+            import warnings
+            warnings.warn(f"coviber loader '{name}' re-registered by {cls.__module__}.{cls.__name__}",
+                          stacklevel=2)
         cls.name = name
         _REGISTRY[name] = cls
         return cls
@@ -43,6 +47,8 @@ def _load_entrypoints():
     _ENTRYPOINTS_LOADED = True
     try:
         eps = metadata.entry_points(group="coviber.loaders")
+    except TypeError:  # Python 3.9: entry_points() takes no selection kwargs
+        eps = metadata.entry_points().get("coviber.loaders", [])
     except Exception:
         eps = []
     for ep in eps:
