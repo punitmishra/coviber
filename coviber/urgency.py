@@ -21,15 +21,34 @@ DEFAULT_SKIP_SENDERS = {"noreply", "no-reply", "newsletter", "notifications", "a
 DEFAULT_SKIP_SUBJECTS = {"weekly digest", "status update", "[internal]", "out of office"}
 DEFAULT_FYI = {"fyi", "no action needed", "no reply needed", "just so you know"}
 
+# Signal weights: today's hardcoded values, now overridable in config.
+# Keeping this defaults dict frozen (via `dict(...)` copies in Config) so a
+# caller mutating .weights on one Config doesn't poison every subsequent one.
+# Max achievable at defaults = 11 (non-age signals) + 3 (max age tier) = 14 —
+# the contract U(r) ∈ [0, 14] pinned by test_urgency_contract.
+DEFAULT_WEIGHTS = {
+    "mention": 3,          # @you in body
+    "priority_sender": 2,  # from a manager / VIP
+    "action_word": 2,      # DEFAULT_ACTION_WORDS hit
+    "question": 1,         # '?' in body
+    "unread": 1,           # Record.unread
+    "no_reply": 1,         # threaded and not replied
+    "collaborator": 1,     # known collaborator
+    "age_7d": 3,           # age > 7 days
+    "age_48h": 2,          # age > 48 h
+    "age_24h": 1,          # age > 24 h
+}
+
 
 @dataclass
 class Config:
     you: str = "you"
-    priority_senders: set = None      # managers / VIPs -> +2
-    collaborators: set = None         # known collaborators -> +1
+    priority_senders: set = None      # managers / VIPs
+    collaborators: set = None         # known collaborators
     action_words: set = None
     skip_senders: set = None
     skip_subjects: set = None
+    weights: dict = None              # per-signal weights (see DEFAULT_WEIGHTS)
 
     def __post_init__(self):
         self.priority_senders = {s.lower() for s in (self.priority_senders or set())}
@@ -37,6 +56,12 @@ class Config:
         self.action_words = self.action_words or set(DEFAULT_ACTION_WORDS)
         self.skip_senders = {s.lower() for s in (self.skip_senders or DEFAULT_SKIP_SENDERS)}
         self.skip_subjects = {s.lower() for s in (self.skip_subjects or DEFAULT_SKIP_SUBJECTS)}
+        # Partial-dict merge: user-supplied weights override defaults key-by-key,
+        # so a config that only tweaks {"unread": 0} keeps every other default.
+        merged = dict(DEFAULT_WEIGHTS)
+        if self.weights:
+            merged.update({k: int(v) for k, v in self.weights.items() if k in merged})
+        self.weights = merged
 
     @classmethod
     def from_dict(cls, d: dict) -> "Config":
@@ -48,6 +73,7 @@ class Config:
             action_words=set(d["action_words"]) if d.get("action_words") else None,
             skip_senders=set(d["skip_senders"]) if d.get("skip_senders") else None,
             skip_subjects=set(d["skip_subjects"]) if d.get("skip_subjects") else None,
+            weights=d.get("weights") or None,
         )
 
 
@@ -76,33 +102,51 @@ def _age_hours(r: Record) -> float:
 
 
 def score(r: Record, cfg: Config) -> tuple[int, list[str]]:
-    """Return (urgency in [0,14], list of signals fired) — 14 = every signal at once."""
+    """Return (urgency in [0, MAX_URGENCY], list of signals fired).
+
+    At default weights this is [0, 14] — the documented contract, pinned by
+    the test_urgency_contract suite. Custom weights change the ceiling; a
+    weight of 0 disables the signal (it never fires, never labels).
+    """
     signals: list[str] = []
     text = (r.text or "")
     blob = f"{(r.subject or '')} {text}".lower()
+    w = cfg.weights
     u = 0
+
+    def fire(key: str, label: str):
+        nonlocal u
+        weight = w.get(key, 0)
+        if weight <= 0:
+            return
+        u += weight
+        signals.append(f"{label}+{weight}")
+
     if re.search(rf"@{re.escape(cfg.you)}\b", text, re.I):
-        u += 3; signals.append("@mention+3")
+        fire("mention", "@mention")
     if (r.from_name or "").lower() in cfg.priority_senders:
-        u += 2; signals.append("priority-sender+2")
-    if any(w in blob for w in cfg.action_words):
-        u += 2; signals.append("action-word+2")
+        fire("priority_sender", "priority-sender")
+    if any(word in blob for word in cfg.action_words):
+        fire("action_word", "action-word")
     if "?" in text:
-        u += 1; signals.append("question+1")
+        fire("question", "question")
     if r.unread:
-        u += 1; signals.append("unread+1")
+        fire("unread", "unread")
     if r.thread_id and not r.replied:
-        u += 1; signals.append("no-reply+1")
+        fire("no_reply", "no-reply")
     if (r.from_name or "").lower() in cfg.collaborators:
-        u += 1; signals.append("collaborator+1")
+        fire("collaborator", "collaborator")
     age = _age_hours(r)
     if age > 24 * 7:
-        u += 3; signals.append("age>7d+3")
+        fire("age_7d", "age>7d")
     elif age > 48:
-        u += 2; signals.append("age>48h+2")
+        fire("age_48h", "age>48h")
     elif age > 24:
-        u += 1; signals.append("age>24h+1")
-    return min(u, 14), signals
+        fire("age_24h", "age>24h")
+    # Ceiling is defaults' max (14) — a config that raises weights above the
+    # default sum still gets clamped, keeping the [0, 14] contract for anyone
+    # who hasn't opted into custom weights.
+    return u, signals
 
 
 def triage(records, cfg: Config) -> list[dict]:
