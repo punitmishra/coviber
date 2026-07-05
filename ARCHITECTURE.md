@@ -10,7 +10,7 @@ source-independent.
  │ email / IMAP │──────────▶ │  Record ─▶ Store (dedup, JSONL/parquet)         │
  │ slack export │──────────▶ │     │         └─▶ embeddings + cosine  ◀── recall│
  │ web scrape   │──────────▶ │     ├─▶ WorkGraph (people·projects·tickets)      │──MCP──▶ Claude
- │ jsonl / api  │──────────▶ │     ├─▶ Urgency triage  (U(r) ∈ [0,15])          │       Desktop/Code
+ │ jsonl / api  │──────────▶ │     ├─▶ Urgency triage  (U(r) ∈ [0,14])          │       Desktop/Code
  │ demo (synth) │──────────▶ │     └─▶ PersonaEngine (inference-free voice)     │       any MCP client
  └──────────────┘            └────────────────────────────────────────────────┘
                                         all on local disk · no cloud egress
