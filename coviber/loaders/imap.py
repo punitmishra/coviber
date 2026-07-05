@@ -20,7 +20,10 @@ from .mbox import message_to_record
 @register("imap")
 class ImapLoader(Loader):
     """config: host, username, password_env (required); port=993, mailbox="INBOX",
-    limit=200 (newest first), unread_only=False, source="email"."""
+    limit=200 (newest first), unread_only=False, source="email", timeout=30
+    (seconds; wraps every network syscall so a wedged server can't hang the
+    thread forever). A limit of 0 or negative is rejected — the loader has no
+    meaningful "take newest 0" semantics."""
 
     def load(self) -> Iterable[Record]:
         cfg = self.config
@@ -35,9 +38,20 @@ class ImapLoader(Loader):
             raise ValueError(f"imap loader: environment variable '{cfg['password_env']}' is empty or unset")
 
         mbox_name = cfg.get("mailbox", "INBOX")
+        # Reject non-positive limits: `limit=-1` used to silently drop the
+        # oldest message (via `ids[--1:]` == `ids[1:]`); `limit=0` returned
+        # the full corpus via the truthiness fallback. Neither matches
+        # "newest N" semantics — fail loud instead.
         limit = int(cfg.get("limit", 200))
+        if limit <= 0:
+            raise ValueError(f"imap loader: 'limit' must be a positive integer, got {limit}")
         source = cfg.get("source", "email")
-        conn = imaplib.IMAP4_SSL(cfg["host"], int(cfg.get("port", 993)))
+        # `timeout` bounds every network syscall (connect, login, SEARCH, FETCH,
+        # logout). Without this, a stalled or hostile server hangs the thread
+        # forever — MCP servers especially can't tolerate an unbounded wait
+        # on a per-tool call. IMAP4_SSL(timeout=) landed in Python 3.9.
+        timeout = float(cfg.get("timeout", 30))
+        conn = imaplib.IMAP4_SSL(cfg["host"], int(cfg.get("port", 993)), timeout=timeout)
         try:
             conn.login(cfg["username"], password)
             typ, _ = conn.select(mbox_name, readonly=True)
