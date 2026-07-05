@@ -53,8 +53,7 @@ class Config:
     def __post_init__(self):
         # `is None` guards so an explicit empty set/list from config is
         # honored as an opt-out; only genuinely-unset fields fall back to
-        # defaults. Before this, `action_words=[]` in YAML was silently
-        # equivalent to omitting the key (audit finding L5/#18).
+        # defaults (audit finding L5/#18; L2/#22 landed the pipeline half).
         self.priority_senders = {s.lower() for s in (
             self.priority_senders if self.priority_senders is not None else set()
         )}
@@ -70,11 +69,30 @@ class Config:
         self.skip_subjects = {s.lower() for s in (
             self.skip_subjects if self.skip_subjects is not None else DEFAULT_SKIP_SUBJECTS
         )}
-        # Partial-dict merge: user-supplied weights override defaults key-by-key,
-        # so a config that only tweaks {"unread": 0} keeps every other default.
+        # Partial-dict merge: user-supplied weights override defaults key-by-
+        # key, so a config that only tweaks {"unread": 0} keeps every other
+        # default. Unknown keys are surfaced (finding L5/#20); non-int values
+        # get a diagnostic naming the offending key (finding L5/#19).
         merged = dict(DEFAULT_WEIGHTS)
         if self.weights:
-            merged.update({k: int(v) for k, v in self.weights.items() if k in merged})
+            unknown = set(self.weights) - set(merged)
+            if unknown:
+                import warnings
+                warnings.warn(
+                    f"coviber urgency: unknown weight key(s) ignored: {sorted(unknown)}. "
+                    f"Known keys: {sorted(merged)}",
+                    RuntimeWarning, stacklevel=3,
+                )
+            for k, v in self.weights.items():
+                if k not in merged:
+                    continue
+                try:
+                    merged[k] = int(v)
+                except (TypeError, ValueError) as e:
+                    raise ValueError(
+                        f"coviber urgency: weight for key '{k}' must be an integer, "
+                        f"got {v!r}: {e}"
+                    ) from e
         self.weights = merged
 
     @classmethod
@@ -100,7 +118,10 @@ def should_skip(r: Record, cfg: Config) -> Optional[str]:
         return "skip-sender"
     if any(s in subject for s in cfg.skip_subjects):
         return "skip-subject"
-    if any(f in blob for f in DEFAULT_FYI):
+    # FYI phrases must match on token boundaries, not bare substring: "fyi"
+    # inside "justifying" / "notifying" / "typify" is a false-positive skip
+    # that would silently drop legitimate obligations (audit finding L5/#16).
+    if any(re.search(rf"(?<![a-z0-9]){re.escape(f)}(?![a-z0-9])", blob) for f in DEFAULT_FYI):
         return "fyi"
     return None
 
@@ -136,7 +157,10 @@ def score(r: Record, cfg: Config) -> tuple[int, list[str]]:
         u += weight
         signals.append(f"{label}+{weight}")
 
-    if re.search(rf"@{re.escape(cfg.you)}\b", text, re.I):
+    # cfg.you=="" would collapse the regex to `@\b`, matching every email
+    # address and every raw '@' — false-positive mentions on essentially
+    # everything. Guard explicitly (audit finding L5/#17).
+    if cfg.you and re.search(rf"@{re.escape(cfg.you)}\b", text, re.I):
         fire("mention", "@mention")
     if (r.from_name or "").lower() in cfg.priority_senders:
         fire("priority_sender", "priority-sender")

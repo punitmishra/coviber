@@ -18,7 +18,11 @@ _GREETING = re.compile(r"^\s*(hi|hey|hello|dear|good morning|good afternoon|than
 _CLOSING = re.compile(r"\b(thanks|thank you|best|regards|cheers|sincerely|talk soon|thx)\b[\s,!.]*$", re.I)
 _WORD = re.compile(r"[A-Za-z][A-Za-z'-]+")
 _STOP = set("the a an and or but to of in on for with is are be i you we it this that at as by from your my our".split())
-_EMOJI = re.compile("[\U0001F300-\U0001FAFF☀-➿]")
+# Extended emoji regex: keeps original supplementary + dingbats coverage,
+# and adds the Miscellaneous-Technical / Box-Drawing / Geometric-Shapes
+# blocks (U+2300–U+25FF) that carry clock, watch, and simple-shape emoji
+# many people use in professional writing (audit finding L6/#30).
+_EMOJI = re.compile("[\U0001F300-\U0001FAFF⌀-➿]")
 
 
 @dataclass
@@ -37,6 +41,15 @@ class VoiceProfile:
         return self.__dict__.copy()
 
     def system_prompt(self, name: str = "the user") -> str:
+        # Empty-corpus sentinel: refuse to fabricate a "formal ~0 words per
+        # message" prompt that would mislead callers into thinking the
+        # profile is real. If nothing was learned, say so and defer to the
+        # caller's own default voice (audit finding L6/#29).
+        if self.n_messages == 0:
+            return (
+                f"No self-authored writing samples were found for {name}. "
+                f"No voice profile learned — draft in your own default voice."
+            )
         reg = "formal" if self.formality > 0.6 else "casual" if self.formality < 0.35 else "neutral"
         op = self.top_openers[0][0] if self.top_openers else "Hi"
         cl = self.top_closers[0][0] if self.top_closers else "Thanks"
@@ -58,18 +71,27 @@ def learn(messages: Iterable[str]) -> VoiceProfile:
     formal_markers = ("please", "kindly", "regards", "sincerely", "would you", "could you", "i would")
     casual_markers = ("hey", "yeah", "gonna", "lol", "thx", "cool", "sure thing", "np")
     for m in msgs:
-        first = m.strip().splitlines()[0] if m.strip().splitlines() else ""
-        last = m.strip().splitlines()[-1] if m.strip().splitlines() else ""
+        stripped_lines = [line for line in m.strip().splitlines() if line.strip()]
+        first = stripped_lines[0] if stripped_lines else ""
+        # A single-line message is not a "letter" — it has an opener OR a
+        # closer, not both. Counting both on the same line double-counts
+        # openers/closers when the greeting keyword ("Thanks", "Cheers") is
+        # ambiguous (audit finding L6/#26).
+        last = stripped_lines[-1] if len(stripped_lines) > 1 else ""
         go = _GREETING.match(first)
         if go:
             openers[go.group(1).title()] += 1
-        gc = _CLOSING.search(last)
-        if gc:
-            closers[gc.group(1).title()] += 1
+        if last:
+            gc = _CLOSING.search(last)
+            if gc:
+                closers[gc.group(1).title()] += 1
         toks = _WORD.findall(m.lower())
         words_total += len(toks)
         for t in toks:
-            if t not in _STOP and len(t) > 3:
+            # Contractions ("don't", "I'll", "we're") aren't signature
+            # vocabulary — everyone uses them. Skip anything with an
+            # apostrophe (audit finding L6/#28).
+            if t not in _STOP and len(t) > 3 and "'" not in t:
                 vocab[t] += 1
         q += m.count("?")
         ex += m.count("!")

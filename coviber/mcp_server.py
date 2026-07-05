@@ -152,7 +152,10 @@ def voice_profile() -> str:
                 "identity when ingesting so the persona engine can learn your voice.")
     vp = learn(mine)
     import json
-    return json.dumps({"profile": vp.to_dict(), "system_prompt": vp.system_prompt()}, indent=2)
+    # Pass `s.you` so the drafted prompt says "Write as <you>" instead of
+    # "Write as the user" — the whole point of an inference-free persona
+    # (audit finding L6/#27).
+    return json.dumps({"profile": vp.to_dict(), "system_prompt": vp.system_prompt(s.you)}, indent=2)
 
 
 @mcp.tool()

@@ -1,6 +1,8 @@
 """Pin the documented urgency contract: U(r) ∈ [0,14], 14 = every signal at once."""
+import pytest
+
 from coviber import Record
-from coviber.urgency import DEFAULT_WEIGHTS, Config, score
+from coviber.urgency import DEFAULT_WEIGHTS, Config, score, should_skip
 
 
 def test_max_score_is_exactly_14():
@@ -66,10 +68,84 @@ def test_dynamic_signal_labels_reflect_weight():
     assert "unread+7" in signals  # label rendered from the live weight
 
 
+# --- audit L5 findings ---------------------------------------------------
+
+
+def test_fyi_does_not_match_common_english_words():
+    """"fyi" inside "justifying", "notifying", "typify" is a false-positive
+    skip that used to silently drop legitimate obligations
+    (audit finding L5/#16)."""
+    cfg = Config(you="you")
+    for word in ("justifying", "notifying", "typify", "modifying"):
+        r = Record(source="s", from_name="A", text=f"we are {word} the plan")
+        assert should_skip(r, cfg) is None, f"'{word}' should not trigger FYI skip"
+
+
+def test_fyi_still_matches_the_phrase_itself():
+    cfg = Config(you="you")
+    for phrase in ("FYI, the deploy is green", "just so you know we shipped",
+                   "no action needed here", "no reply needed"):
+        r = Record(source="s", from_name="A", text=phrase)
+        assert should_skip(r, cfg) == "fyi", f"'{phrase}' should trigger FYI skip"
+
+
+def test_empty_you_does_not_fire_mention_on_any_at_sign():
+    """An empty `cfg.you` used to collapse the mention regex to `@\\b`,
+    matching every email address as a mention (audit finding L5/#17)."""
+    cfg = Config(you="")
+    r = Record(source="s", from_name="A", text="cc bob@example.com and carol@example.com")
+    u, signals = score(r, cfg)
+    assert "@mention+3" not in signals
+    # Same message with a real `you` still fires when the mention matches.
+    cfg2 = Config(you="you")
+    r2 = Record(source="s", from_name="A", text="cc @you please")
+    _, signals2 = score(r2, cfg2)
+    assert any(s.startswith("@mention") for s in signals2)
+
+
+def test_empty_set_opt_out_of_default_skip_lists_and_action_words():
+    """Explicit empty sets in Config must opt out of the module defaults
+    (audit finding L5/#18). L2's PR already lands the same guard via
+    `is not None`; ship the test in the urgency layer where the fix lives."""
+    cfg = Config(you="you", action_words=set(), skip_senders=set(), skip_subjects=set())
+    assert cfg.action_words == set()
+    assert cfg.skip_senders == set()
+    assert cfg.skip_subjects == set()
+    # Default fallback still works.
+    default_cfg = Config(you="you")
+    assert default_cfg.action_words and default_cfg.skip_senders and default_cfg.skip_subjects
+
+
+def test_weight_bad_value_names_the_offending_key():
+    """A non-int weight value used to raise a bare `ValueError` with no
+    indication of which key was bad — the operator had to scan the whole
+    config to find it (audit finding L5/#19)."""
+    with pytest.raises(ValueError) as exc:
+        Config(you="you", weights={"unread": "not-an-int"})
+    msg = str(exc.value)
+    assert "unread" in msg and "not-an-int" in msg
+
+
+def test_weight_unknown_key_emits_warning():
+    """A typo like `mentin: 5` used to be silently dropped from the weights
+    dict; the operator's tuning had no effect and they got no signal
+    (audit finding L5/#20)."""
+    import warnings
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        Config(you="you", weights={"mentin": 5, "mention": 4})  # typo + real key
+        matches = [x for x in w if "mentin" in str(x.message)]
+        assert matches, f"expected a warning naming 'mentin', got {[str(x.message) for x in w]}"
+
+
 if __name__ == "__main__":
     test_max_score_is_exactly_14(); test_score_never_exceeds_contract()
     test_default_weights_are_stable(); test_custom_weights_change_score()
     test_zero_weight_disables_signal_and_label()
     test_partial_weights_merge_over_defaults()
     test_dynamic_signal_labels_reflect_weight()
+    test_fyi_does_not_match_common_english_words()
+    test_fyi_still_matches_the_phrase_itself()
+    test_empty_you_does_not_fire_mention_on_any_at_sign()
+    test_empty_set_opt_out_of_default_skip_lists_and_action_words()
     print("ok")
