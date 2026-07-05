@@ -12,14 +12,12 @@ import json
 import math
 import os
 import sys
-import tempfile
 import uuid
 from types import SimpleNamespace
 
 import pytest
 
 import coviber.store as store_mod
-import coviber.vector_stores as vs_mod
 from coviber.record import Record
 from coviber.store import EMBED_MODEL, Store
 from coviber.vector_stores import JSONVectorStore, resolve
