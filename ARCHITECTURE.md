@@ -10,7 +10,7 @@ source-independent.
  │ email / IMAP │──────────▶ │  Record ─▶ Store (dedup, JSONL/parquet)         │
  │ slack export │──────────▶ │     │         └─▶ embeddings + cosine  ◀── recall│
  │ web scrape   │──────────▶ │     ├─▶ WorkGraph (people·projects·tickets)      │──MCP──▶ Claude
- │ jsonl / api  │──────────▶ │     ├─▶ Urgency triage  (U(r) ∈ [0,15])          │       Desktop/Code
+ │ jsonl / api  │──────────▶ │     ├─▶ Urgency triage  (U(r) ∈ [0,14])          │       Desktop/Code
  │ demo (synth) │──────────▶ │     └─▶ PersonaEngine (inference-free voice)     │       any MCP client
  └──────────────┘            └────────────────────────────────────────────────┘
                                         all on local disk · no cloud egress
@@ -19,12 +19,12 @@ source-independent.
 ## Modules (map 1:1 to the whitepaper)
 | File | Role | Paper §|
 |------|------|--------|
-| `record.py` | Canonical `Record`; content-hash `id` for natural dedup | 3.2 |
+| `record.py` | Canonical `Record`; content-hash `id` for natural dedup; `ts` normalized to ISO-8601 UTC | 3.2 |
 | `loaders/` | `Loader` interface + registry; `demo`/`jsonl`/`webscrape` built-ins | 3.3 |
 | `workgraph.py` | Incremental entity extraction + bidirectional links, O(1)/record | 3.4 |
 | `urgency.py` | Multi-signal urgency score + skip filter | 3.5 |
 | `persona.py` | Statistical, inference-free voice model | 3.6 |
-| `store.py` | Dedup persistence + local semantic search | 3.3, 3.7 |
+| `store.py` | Dedup persistence (writers serialize on an advisory file lock) + local semantic search | 3.3, 3.7 |
 | `pipeline.py` | `ingest()` cycle: load → store → graph → (triage on demand) | 3.3 |
 | `mcp_server.py` | MCP tools over stdio (`recall`, `catch_me_up`, `who_is`, …) | 3.8 |
 

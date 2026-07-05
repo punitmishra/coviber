@@ -49,7 +49,10 @@ class WorkGraph:
             n["projects"] |= projects
             n["channels"] |= channels
             n["interaction_count"] += 1
-            n["last_seen"] = max(n.get("last_seen", ""), r.ts)
+            # Record normalizes parseable ts to ISO UTC, so max() is chronological;
+            # skip non-ISO strays so garbage never overwrites a real last_seen.
+            if r.ts[:1].isdigit() and "T" in r.ts:
+                n["last_seen"] = max(n.get("last_seen", ""), r.ts)
         for project in projects:
             n = self.projects[project]
             n["people"] |= people

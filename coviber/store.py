@@ -6,6 +6,7 @@ extra), search upgrades to local embeddings + cosine — same model the whitepap
 uses (all-MiniLM-L6-v2, 384-dim). Vectors persist in embeddings.json (atomic
 write, like records.jsonl) so only new records are encoded per query; a model
 change invalidates the cache. Everything stays on disk, no cloud egress.
+Writers serialize on an advisory file lock (`.lock`); reads stay lock-free.
 """
 from __future__ import annotations
 
@@ -13,6 +14,7 @@ import json
 import math
 import os
 import sys
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Iterable
 
@@ -20,7 +22,40 @@ from .record import Record
 
 EMBED_MODEL = "all-MiniLM-L6-v2"
 
+try:
+    import fcntl  # POSIX
+except ImportError:
+    fcntl = None
+try:
+    import msvcrt  # Windows
+except ImportError:
+    msvcrt = None
+
 _embedder = None
+
+
+@contextmanager
+def _write_lock(data_dir: Path):
+    """Advisory inter-process lock on `<data_dir>/.lock`, held across a writer's
+    whole read-merge-write cycle so concurrent writers (e.g. `coviber ingest` and
+    the MCP server on the same data dir) queue up instead of clobbering each
+    other. Blocking acquire. Readers never take it — the write-then-rename in
+    upsert() already guarantees they can't see a torn file. No-op on platforms
+    with neither fcntl nor msvcrt: single-process behaviour is unchanged, only
+    the multi-writer guarantee is lost.
+    """
+    fh = (data_dir / ".lock").open("ab")
+    try:
+        if fcntl is not None:
+            fcntl.flock(fh, fcntl.LOCK_EX)  # released on close
+        elif msvcrt is not None:
+            fh.seek(0); msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)  # retries ~10s, then raises
+        yield
+    finally:
+        if fcntl is None and msvcrt is not None:
+            with suppress(OSError):
+                fh.seek(0); msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+        fh.close()
 
 
 def _get_embedder():
@@ -41,18 +76,21 @@ class Store:
 
     # --- record persistence (dedup by id, keep last) ---
     def upsert(self, records: Iterable[Record]) -> int:
-        existing = {r.id: r for r in self.all()}
-        n_new = 0
-        for r in records:
-            if r.id not in existing:
-                n_new += 1
-            existing[r.id] = r
-        # write-then-rename so a crash mid-write can't destroy the store
-        tmp = self.records_path.with_suffix(".jsonl.tmp")
-        with tmp.open("w", encoding="utf-8") as f:
-            for r in existing.values():
-                f.write(json.dumps(r.to_dict()) + "\n")
-        os.replace(tmp, self.records_path)
+        # the lock must cover the read too, or two writers interleave read-merge-
+        # rewrite and the last one silently drops the other's records
+        with _write_lock(self.dir):
+            existing = {r.id: r for r in self.all()}
+            n_new = 0
+            for r in records:
+                if r.id not in existing:
+                    n_new += 1
+                existing[r.id] = r
+            # write-then-rename so a crash mid-write can't destroy the store
+            tmp = self.records_path.with_suffix(".jsonl.tmp")
+            with tmp.open("w", encoding="utf-8") as f:
+                for r in existing.values():
+                    f.write(json.dumps(r.to_dict()) + "\n")
+            os.replace(tmp, self.records_path)
         return n_new
 
     def all(self) -> list[Record]:
@@ -137,4 +175,6 @@ class Store:
         return sorted(scored, key=lambda x: -x[0])
 
     def save_graph(self, graph_dict: dict):
-        (self.dir / "workgraph.json").write_text(json.dumps(graph_dict, indent=2), encoding="utf-8")
+        with _write_lock(self.dir):
+            (self.dir / "workgraph.json").write_text(json.dumps(graph_dict, indent=2),
+                                                     encoding="utf-8")

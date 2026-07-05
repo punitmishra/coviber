@@ -4,10 +4,42 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _normalize_ts(s: str) -> str:
+    """Best-effort ts → ISO-8601 UTC, so lexicographic order == chronological.
+
+    Tries ISO (with the 'Z' shim — 3.9's fromisoformat can't parse 'Z'), then
+    RFC-2822 (email Date:), then epoch seconds (sanity range ~1990–2100).
+    Naive datetimes are assumed UTC; aware ones converted via astimezone so
+    mixed-offset inputs still order correctly. Unparseable input passes through.
+    """
+    s = (s or "").strip()
+    if not s:
+        return s
+    dt = None
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            dt = parsedate_to_datetime(s)  # TypeError pre-3.10 on bad input
+        except (TypeError, ValueError):
+            try:
+                epoch = float(s)
+                if 631152000 <= epoch <= 4102444800:  # 1990-01-01 .. 2100-01-01
+                    dt = datetime.fromtimestamp(epoch, tz=timezone.utc)
+            except ValueError:
+                pass
+    if dt is None:
+        return s
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat()
 
 
 def _hash(*parts: str) -> str:
@@ -44,6 +76,7 @@ class Record:
             self.id = _hash(self.text, self.subject, self.from_name, self.source)
         if not self.ts:
             self.ts = self.scraped_at
+        self.ts = _normalize_ts(self.ts)  # not part of the id hash
 
     def to_dict(self) -> dict:
         return asdict(self)
