@@ -53,7 +53,7 @@ class Config:
     def __post_init__(self):
         # `is None` guards so an explicit empty set/list from config is
         # honored as an opt-out; only genuinely-unset fields fall back to
-        # defaults (audit finding L5/#18, L2/#22 landed the pipeline half).
+        # defaults (audit finding L5/#18; L2/#22 landed the pipeline half).
         self.priority_senders = {s.lower() for s in (
             self.priority_senders if self.priority_senders is not None else set()
         )}
