@@ -129,6 +129,60 @@ def test_imap_requires_env_var_to_be_set():
         assert "COVIBER_TEST_IMAP_PW" in str(e)
 
 
+def test_mbox_rejects_non_positive_limit():
+    """Negative / zero limit used to silently return `msgs[1:]` (drop oldest)
+    or the full corpus — neither matches "newest N" semantics. Fail loud
+    instead (audit finding L3/#2)."""
+    with tempfile.TemporaryDirectory() as d:
+        for bad in (-1, 0, -100):
+            try:
+                list(get_loader("mbox", {"path": _make_mbox(d), "limit": bad}).load())
+                raise AssertionError(f"expected ValueError for limit={bad}")
+            except ValueError as e:
+                assert "positive integer" in str(e)
+
+
+def test_imap_rejects_non_positive_limit():
+    os.environ["COVIBER_TEST_IMAP_PW"] = "hunter2"
+    for bad in (-1, 0):
+        cfg = {"host": "imap.example.com", "username": "you@acme.com",
+               "password_env": "COVIBER_TEST_IMAP_PW", "limit": bad}
+        try:
+            list(get_loader("imap", cfg).load())
+            raise AssertionError(f"expected ValueError for limit={bad}")
+        except ValueError as e:
+            assert "positive integer" in str(e)
+
+
+def test_imap_timeout_is_passed_to_ssl_constructor(monkeypatch):
+    """The imap loader must pass a bounded `timeout` to imaplib.IMAP4_SSL so
+    a slow/wedged server can't hang the thread forever (audit finding L3/#4).
+    We monkeypatch the SSL constructor and assert the kwarg."""
+    captured = {}
+    def fake_ssl(host, port, timeout=None):
+        captured["host"] = host; captured["port"] = port; captured["timeout"] = timeout
+        raise ConnectionError("stop-here — we only need to see the kwargs")
+    monkeypatch.setattr("coviber.loaders.imap.imaplib.IMAP4_SSL", fake_ssl)
+    os.environ["COVIBER_TEST_IMAP_PW"] = "hunter2"
+
+    # Default: 30s.
+    cfg = {"host": "imap.example.com", "username": "you@acme.com",
+           "password_env": "COVIBER_TEST_IMAP_PW"}
+    try:
+        list(get_loader("imap", cfg).load())
+    except ConnectionError:
+        pass
+    assert captured["timeout"] == 30.0
+
+    # Override honored.
+    cfg["timeout"] = 5
+    try:
+        list(get_loader("imap", cfg).load())
+    except ConnectionError:
+        pass
+    assert captured["timeout"] == 5.0
+
+
 # ---------------------------------------------------------------------------
 # IMAP protocol-fake tests (#15): monkeypatch imaplib.IMAP4_SSL with a fake
 # that speaks the exact response shapes real servers produce. Offline; no
@@ -141,8 +195,8 @@ class _FakeIMAP:
     servers do. FETCH toggles between the two variants Python's stdlib docs
     call out: `[(meta, raw), b')']` and `[(meta_head, raw), b'flags-trail)']`."""
 
-    def __init__(self, host, port):
-        self.host, self.port = host, port
+    def __init__(self, host, port, timeout=None):
+        self.host, self.port, self.timeout = host, port, timeout
         self.calls: list[tuple] = []
         self.login_ok = True
         self.select_ok = True
@@ -194,8 +248,8 @@ def _wire_fake(monkeypatch, ids, messages, *, login_ok=True, select_ok=True,
                fetch_ok=None):
     """Install a fresh _FakeIMAP for a single test; return it for assertions."""
     holder = {}
-    def factory(host, port):
-        fake = _FakeIMAP(host, port)
+    def factory(host, port, timeout=None):
+        fake = _FakeIMAP(host, port, timeout=timeout)
         fake.login_ok = login_ok
         fake.select_ok = select_ok
         fake.search_ids = ids

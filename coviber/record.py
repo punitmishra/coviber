@@ -18,8 +18,13 @@ def _normalize_ts(s: str) -> str:
     RFC-2822 (email Date:), then epoch seconds (sanity range ~1990–2100).
     Naive datetimes are assumed UTC; aware ones converted via astimezone so
     mixed-offset inputs still order correctly. Unparseable input passes through.
+
+    Non-string inputs (int/float epoch, bool, None) are coerced via str() —
+    the JSONL loader and hand-edited records.jsonl can both produce these,
+    and a raw AttributeError from `.strip()` would brick the whole store on
+    the next read (audit finding L3/#5 + L1/#1).
     """
-    s = (s or "").strip()
+    s = str(s or "").strip()
     if not s:
         return s
     dt = None
