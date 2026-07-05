@@ -1,0 +1,62 @@
+"""The pipeline: load (via any Loader) → dedup/store → WorkGraph → triage.
+
+This is the loader-agnostic core. Swap the loader; everything downstream is
+unchanged. Mirrors the whitepaper's ingest flow, with source-specific parsing
+pushed out to pluggable loaders instead of a hardcoded per-platform dispatch.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from .loaders import get_loader
+from .store import Store
+from .urgency import Config as UrgencyConfig, triage
+from .workgraph import WorkGraph
+
+
+@dataclass
+class Settings:
+    loader: str = "demo"
+    loader_config: dict = field(default_factory=dict)
+    data_dir: str = "./coviber_data"
+    you: str = "you"
+    known_projects: list = field(default_factory=list)
+    priority_senders: list = field(default_factory=list)
+    collaborators: list = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Settings":
+        d = dict(d or {})
+        return cls(
+            loader=d.get("loader", "demo"),
+            loader_config=d.get("config", {}),
+            data_dir=d.get("data_dir", "./coviber_data"),
+            you=d.get("you", "you"),
+            known_projects=d.get("known_projects", []),
+            priority_senders=d.get("priority_senders", []),
+            collaborators=d.get("collaborators", []),
+        )
+
+
+def ingest(settings: Settings) -> dict:
+    """Run one load→store→graph cycle. Returns a small stats dict."""
+    loader = get_loader(settings.loader, settings.loader_config)
+    records = list(loader.load())
+
+    store = Store(settings.data_dir)
+    n_new = store.upsert(records)
+
+    graph = WorkGraph(known_projects=settings.known_projects, you=settings.you)
+    graph.ingest(store.all())
+    store.save_graph(graph.to_dict())
+
+    return {"loader": settings.loader, "loaded": len(records), "new": n_new,
+            "total": len(store.all()), "graph": graph.summary()}
+
+
+def build_queue(settings: Settings) -> list[dict]:
+    store = Store(settings.data_dir)
+    cfg = UrgencyConfig(you=settings.you, priority_senders=set(settings.priority_senders),
+                        collaborators=set(settings.collaborators))
+    return triage(store.all(), cfg)

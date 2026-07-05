@@ -1,0 +1,30 @@
+# Example: scrape a list-style web page into records — no per-site code.
+# Run:  coviber ingest --config examples/scrape_config.example.yaml
+# (needs the scrape extra:  pip install "coviber[scrape]")
+
+loader: webscrape
+data_dir: ./coviber_data
+you: you
+
+# Who counts as urgent / a collaborator (drives triage scoring):
+priority_senders: []          # e.g. ["Grace Hopper"]  -> +2 urgency
+collaborators: []             # e.g. ["Ada Byron"]      -> +1 urgency
+known_projects: ["Falcon", "Orbit", "Atlas"]
+
+config:
+  url: https://news.ycombinator.com/
+  source: hn
+  timeout: 20
+  record_selector: "tr.athing"          # one Record per matched element
+  fields:
+    subject: { selector: "span.titleline a", attr: text }
+    url:     { selector: "span.titleline a", attr: href }
+    channel: { selector: "span.sitestr",     attr: text }
+
+# --- Swap-in examples (uncomment one) -------------------------------------
+# JSONL (universal): dump anything to JSONL, one object per line.
+# loader: jsonl
+# config: { path: examples/acme_demo.jsonl }
+#
+# Demo (zero setup): synthetic cross-platform stream.
+# loader: demo

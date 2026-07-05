@@ -1,0 +1,24 @@
+cff-version: 1.2.0
+message: "If you use CoViber, please cite it."
+title: "CoViber: A Local-First Memory Engine for LLMs over MCP"
+abstract: >-
+  CoViber is a local-first, privacy-preserving memory engine that gives any LLM
+  continuous personal context via the Model Context Protocol. It maintains a
+  cross-source work graph, a multi-signal urgency triage queue, an inference-free
+  persona model, and local semantic search — entirely on the user's machine, with
+  no cloud egress.
+type: software
+authors:
+  - family-names: Mishra
+    given-names: Punit
+version: 0.1.0
+license: Apache-2.0
+keywords:
+  - large language models
+  - model context protocol
+  - personal knowledge graph
+  - local-first
+  - privacy
+  - retrieval-augmented generation
+repository-code: "https://github.com/punitmishra/coviber"
+# doi: 10.5281/zenodo.XXXXXXX   # mint on first tagged release via GitHub–Zenodo

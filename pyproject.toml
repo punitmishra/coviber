@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "coviber"
+version = "0.1.0"
+description = "Local-first continuous context replica for AI-augmented knowledge work — swappable loaders, work graph, urgency triage, semantic memory, MCP-native."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Punit Mishra" }]
+keywords = ["knowledge-graph", "personal-ai", "context", "mcp", "rag", "triage", "local-first"]
+dependencies = []  # core runs on the standard library only
+
+[project.optional-dependencies]
+scrape = ["beautifulsoup4>=4.11", "pyyaml>=6"]
+search = ["sentence-transformers>=2.2", "numpy>=1.23"]
+mcp = ["mcp>=1.0"]
+all = ["beautifulsoup4>=4.11", "pyyaml>=6", "sentence-transformers>=2.2", "numpy>=1.23", "mcp>=1.0"]
+
+[project.scripts]
+coviber = "coviber.cli:main"
+
+[project.entry-points."coviber.loaders"]
+# third-party loaders can register here; built-ins load automatically
+
+[tool.setuptools.packages.find]
+include = ["coviber*"]
