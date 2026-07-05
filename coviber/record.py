@@ -86,7 +86,36 @@ class Record:
     def to_dict(self) -> dict:
         return asdict(self)
 
+    _WARNED_UNKNOWN_FIELDS: set = None  # class attribute; per-key one-shot warning
+
     @classmethod
     def from_dict(cls, d: dict) -> "Record":
-        allowed = {f for f in cls.__dataclass_fields__}
+        """Build a Record from a dict, tolerating unknown keys.
+
+        Unknown keys are dropped (forward-compat: an older coviber reading a
+        records.jsonl written by a newer version shouldn't crash). But the
+        first time we see a given unknown key we emit a `RuntimeWarning` so
+        the operator knows their store carries fields this coviber can't
+        represent — otherwise the drop is invisible and a downgrade
+        silently loses data on the next upsert rewrite (audit2/#4).
+        """
+        allowed = cls.__dataclass_fields__
+        unknown = [k for k in d if k not in allowed]
+        if unknown:
+            # De-dupe warnings across records: only warn once per unknown key
+            # name per process. Otherwise a store with N records containing an
+            # unknown field would emit N warnings, drowning real signals.
+            if cls._WARNED_UNKNOWN_FIELDS is None:
+                cls._WARNED_UNKNOWN_FIELDS = set()
+            fresh = [k for k in unknown if k not in cls._WARNED_UNKNOWN_FIELDS]
+            if fresh:
+                cls._WARNED_UNKNOWN_FIELDS.update(fresh)
+                import warnings
+                warnings.warn(
+                    f"coviber: Record.from_dict dropping unknown field(s) "
+                    f"{sorted(fresh)} — this store may have been written by a "
+                    f"newer coviber version. Dropped fields will be lost on "
+                    f"the next upsert rewrite.",
+                    RuntimeWarning, stacklevel=2,
+                )
         return cls(**{k: v for k, v in d.items() if k in allowed})

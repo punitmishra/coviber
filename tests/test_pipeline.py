@@ -156,9 +156,35 @@ def test_skip_senders_respects_token_boundaries():
 
 
 def test_keyword_search_returns_nothing_on_zero_hits():
+    """The KEYWORD search backend returns [] when no term overlaps any record.
+    Explicit backend forcing via no_embedder so the assertion doesn't hinge
+    on whether the local dev environment happens to have [search] installed
+    (audit2/#25 — the pre-fix version quietly took the embedding path when
+    sentence-transformers was installed, and cosine similarity is never
+    exactly zero, so the assertion failed locally but passed in CI)."""
+    from tests.test_embedding_index import no_embedder
     with tempfile.TemporaryDirectory() as d:
         ingest(Settings(loader="demo", data_dir=d))
-        assert Store(d).search("zzzqqq gibberish") == []
+        with no_embedder():
+            hits = Store(d).search("zzzqqq gibberish")
+        assert hits == []
+
+
+def test_embedding_search_always_returns_hits_up_to_limit():
+    """The EMBEDDING search backend always returns up to `limit` results,
+    even for nonsense queries — cosine similarity on a normalized vector
+    space is never zero. This is the complement of the keyword-empty
+    contract above and pins the different semantic each backend commits to."""
+    from tests.test_embedding_index import FakeEmbedder, fake_embedder
+    from coviber.record import Record
+    with tempfile.TemporaryDirectory() as d:
+        store = Store(d)
+        store.upsert([Record(source="s", subject=f"s{i}", text=f"body {i}")
+                      for i in range(4)])
+        with fake_embedder(FakeEmbedder()):
+            hits = store.search("completely-unrelated-gibberish", limit=3)
+        assert len(hits) == 3  # ranks by similarity, never returns empty
+        assert all(isinstance(s, float) for s, _ in hits)
 
 
 def test_store_survives_corrupt_line():
