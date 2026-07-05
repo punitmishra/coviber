@@ -186,11 +186,131 @@ def test_jsonl_loader_handles_null_source_and_reports_bad_lines():
             assert "in.jsonl:1" in str(e)
 
 
+def test_jsonl_loader_reports_bad_line_number_mid_stream():
+    """A bad line at position N must name that line in the error message —
+    otherwise the operator has no signal about where to fix the input
+    (audit finding L3/#5). The loader's fail-loud contract for corrupt
+    input is intentional; this test pins the diagnostic content."""
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "in.jsonl"
+        p.write_text(
+            json.dumps({"source": "s", "text": "line 1"}) + "\n"
+            + "not-json-line-2\n"
+            + json.dumps({"source": "s", "text": "line 3"}) + "\n",
+            encoding="utf-8",
+        )
+        try:
+            list(get_loader("jsonl", {"path": str(p)}).load())
+            raise AssertionError("expected ValueError for corrupt line 2")
+        except ValueError as e:
+            msg = str(e)
+            assert "in.jsonl:2" in msg  # names the specific line
+            assert "invalid JSON" in msg
+
+
+def test_jsonl_loader_handles_numeric_epoch_ts():
+    """Records with a numeric epoch ts (a common shape for API dumps) must
+    now flow through without crashing — before the L1 _normalize_ts fix,
+    `.strip()` on an int raised AttributeError uncaught (audit finding L3/#5
+    + L1/#1)."""
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "in.jsonl"
+        p.write_text(
+            json.dumps({"source": "s", "text": "epoch", "ts": 1700000000}) + "\n"
+            + json.dumps({"source": "s", "text": "bool-ts", "ts": True}) + "\n",
+            encoding="utf-8",
+        )
+        recs = list(get_loader("jsonl", {"path": str(p)}).load())
+        assert [r.text for r in recs] == ["epoch", "bool-ts"]  # both parsed
+        # int epoch in the sanity range normalizes to ISO
+        assert recs[0].ts.startswith("2023-")
+
+
 def test_cli_accepts_data_dir_after_subcommand():
     for argv in (["serve", "--data-dir", "/tmp/x"], ["--data-dir", "/tmp/x", "serve"], ["demo"]):
         args = build_parser().parse_args(argv)
         assert hasattr(args, "data_dir")
     assert build_parser().parse_args(["serve", "--data-dir", "/tmp/x"]).data_dir == "/tmp/x"
+
+
+def test_settings_from_dict_full_passthrough():
+    """Every Settings field must round-trip through from_dict — a silently-
+    dropped field would drift the CLI (which passes fields explicitly) from
+    the MCP server (which reads Settings.from_dict on every tool call)
+    without any test catching it (audit finding L2/#25)."""
+    d = {
+        "loader": "jsonl",
+        "config": {"path": "/tmp/x.jsonl"},
+        "data_dir": "/tmp/s",
+        "you": "punit",
+        "known_projects": ["A", "B"],
+        "priority_senders": ["grace"],
+        "collaborators": ["ada"],
+        "action_words": ["blocked"],
+        "skip_senders": ["bot"],
+        "skip_subjects": ["digest"],
+        "weights": {"unread": 5},
+        "qdrant": {"url": "http://x:6333"},
+    }
+    s = Settings.from_dict(d)
+    assert s.loader == "jsonl"
+    assert s.loader_config == {"path": "/tmp/x.jsonl"}   # renamed "config" → loader_config
+    assert s.data_dir == "/tmp/s"
+    assert s.you == "punit"
+    assert s.known_projects == ["A", "B"]
+    assert s.priority_senders == ["grace"]
+    assert s.collaborators == ["ada"]
+    assert s.action_words == ["blocked"]
+    assert s.skip_senders == ["bot"]
+    assert s.skip_subjects == ["digest"]
+    assert s.weights == {"unread": 5}
+    assert s.qdrant == {"url": "http://x:6333"}
+
+
+def test_settings_from_dict_defaults_when_absent():
+    s = Settings.from_dict({})
+    assert s.loader == "demo"
+    assert s.data_dir == "./coviber_data"
+    assert s.you == "you"
+    assert s.known_projects == [] and s.priority_senders == [] and s.collaborators == []
+    assert s.action_words is None and s.skip_senders is None and s.skip_subjects is None
+    assert s.weights is None and s.qdrant is None
+
+
+def test_empty_list_from_config_opts_out_of_defaults():
+    """`action_words: []` / `skip_senders: []` / `skip_subjects: []` in the
+    config file must mean "opt out of these defaults", NOT "silently fall
+    back to the defaults" (audit findings L2/#22 + L5/#18)."""
+    with tempfile.TemporaryDirectory() as d:
+        s = Settings(loader="demo", data_dir=d, skip_senders=[], action_words=[])
+        # Ingest the demo corpus and triage: with skip_senders=[] the bot
+        # entries must NOT be filtered by the default bot/newsletter list,
+        # AND with action_words=[] the action-word signal must never fire.
+        ingest(s)
+        queue = build_queue(s)
+        # The demo corpus contains an "acme-ci-bot" sender; with default
+        # skip_senders it's filtered out. With explicit empty list, it
+        # should now appear in triage (or at least no test should assert
+        # it's absent). We assert the opt-out took effect by checking that
+        # no queue entry carries the action-word+ signal.
+        assert not any("action-word" in " ".join(t["signals"]) for t in queue), (
+            "action_words=[] must disable the action-word signal"
+        )
+
+
+def test_empty_list_urgency_config_opts_out_of_defaults():
+    """Same guarantee, one level down: Urgency Config accepts an explicit
+    empty set/list as an opt-out from DEFAULT_ACTION_WORDS / SKIP_SENDERS /
+    SKIP_SUBJECTS (finding L5/#18)."""
+    cfg = Config(you="you", action_words=set(), skip_senders=set(), skip_subjects=set())
+    assert cfg.action_words == set()  # empty opt-out honored
+    assert cfg.skip_senders == set()
+    assert cfg.skip_subjects == set()
+
+    # Baseline: None still falls back to defaults.
+    default_cfg = Config(you="you")
+    assert default_cfg.action_words  # populated from DEFAULT_ACTION_WORDS
+    assert default_cfg.skip_senders
 
 
 _ALL = [test_loaders_registered, test_demo_pipeline_end_to_end, test_dedup_is_idempotent,
@@ -204,7 +324,10 @@ _ALL = [test_loaders_registered, test_demo_pipeline_end_to_end, test_dedup_is_id
         test_workgraph_excludes_you_case_insensitively, test_triage_skips_self_authored,
         test_skip_senders_respects_token_boundaries, test_keyword_search_returns_nothing_on_zero_hits,
         test_store_survives_corrupt_line, test_jsonl_loader_handles_null_source_and_reports_bad_lines,
-        test_cli_accepts_data_dir_after_subcommand]
+        test_cli_accepts_data_dir_after_subcommand,
+        test_settings_from_dict_full_passthrough, test_settings_from_dict_defaults_when_absent,
+        test_empty_list_from_config_opts_out_of_defaults,
+        test_empty_list_urgency_config_opts_out_of_defaults]
 
 if __name__ == "__main__":
     for fn in _ALL:

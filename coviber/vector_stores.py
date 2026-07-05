@@ -82,11 +82,27 @@ class JSONVectorStore:
         return {k: v for k, v in vecs.items() if isinstance(v, list)}
 
     def _persist(self, vectors: dict[str, list[float]]):
-        tmp = self._path.with_suffix(".json.tmp")
-        tmp.write_text(
-            json.dumps({"model": self._model, "vectors": vectors}), encoding="utf-8",
-        )
-        os.replace(tmp, self._path)
+        # PID + short-uuid tag on the tmp path so two concurrent writers
+        # (e.g. `coviber ingest` in one process and the MCP server serving a
+        # cold-cache query in another, on the same data_dir) can't stomp on
+        # each other's `.json.tmp`. `search()` is deliberately lock-free;
+        # unique tmp names give us the same atomic-replace guarantee without
+        # taking an inter-process lock on the read path.
+        tmp = self._path.with_suffix(f".json.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}")
+        try:
+            tmp.write_text(
+                json.dumps({"model": self._model, "vectors": vectors}), encoding="utf-8",
+            )
+            os.replace(tmp, self._path)
+        except Exception:
+            # Best-effort cleanup — leaving a stray .tmp isn't fatal (next
+            # persist writes to a new suffix) but growing them is untidy.
+            if tmp.exists():
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+            raise
 
     # --- protocol ---
     def known_ids(self) -> set[str]:
