@@ -115,6 +115,35 @@ coviber query "GPU fallback for embeddings"
 # [0.582] Ada Byron · email/inbox — Question about the Orbit embedding router
 ```
 
+### Scale past ~10⁵ records with Qdrant (optional)
+
+The default `JSONVectorStore` loads all vectors on every query — fine up to
+around 10⁵ records, dominated by load cost past that. When you need more, add
+Qdrant as the vector backend without changing anything else:
+
+```bash
+docker compose up -d                    # starts qdrant on :6333, data in ./data/qdrant/
+pip install -e ".[qdrant,search]"       # qdrant-client + the local embedder
+COVIBER_QDRANT_URL=http://localhost:6333 coviber ingest --loader demo
+COVIBER_QDRANT_URL=http://localhost:6333 coviber query "your query"
+# backend: embeddings (all-MiniLM-L6-v2) via QdrantVectorStore
+```
+
+Same result shape, same encoder — Qdrant just handles the vector store and
+ANN search server-side, so query cost stops growing with corpus size.
+Configuration goes through `qdrant:` in the settings file for reproducibility:
+
+```yaml
+qdrant:
+  url: http://localhost:6333
+  collection: coviber_records   # default
+  api_key: ${QDRANT_API_KEY}    # optional; can also set COVIBER_QDRANT_API_KEY
+```
+
+Delete `./data/qdrant/` (or call `store._vectors.wipe()`) to reset the index.
+Switching between backends is safe — model tags are persisted per backend, so
+each rebuilds its own index the first time it runs.
+
 ## Use your own data
 
 **Anything → JSONL** (one record per line; any subset of fields):
@@ -217,5 +246,5 @@ yourself. Numbers scale with `--scale` and hardware. See [DATASHEET](DATASHEET.m
 [Architecture](ARCHITECTURE.md) · [Whitepaper](WHITEPAPER.md) · [Datasheet](DATASHEET.md) · [Contributing](CONTRIBUTING.md)
 
 ## Status & license
-v0.1 — a clean-room build on 100% synthetic data (see [DATASHEET](DATASHEET.md)).
+v0.2 — a clean-room build on 100% synthetic data (see [DATASHEET](DATASHEET.md)).
 Apache-2.0. Contributions of new loaders welcome — see [CONTRIBUTING](CONTRIBUTING.md).

@@ -25,6 +25,7 @@ source-independent.
 | `urgency.py` | Multi-signal urgency score + skip filter | 3.5 |
 | `persona.py` | Statistical, inference-free voice model | 3.6 |
 | `store.py` | Dedup persistence (writers serialize on an advisory file lock) + local semantic search | 3.3, 3.7 |
+| `vector_stores.py` | Pluggable vector-index backends: `JSONVectorStore` (default) or `QdrantVectorStore` (optional, [qdrant] extra) | 3.7 |
 | `pipeline.py` | `ingest()` cycle: load → store → graph → (triage on demand) | 3.3 |
 | `mcp_server.py` | MCP tools over stdio (`recall`, `catch_me_up`, `who_is`, …) | 3.8 |
 
@@ -32,12 +33,24 @@ source-independent.
 - **One seam.** New source = new `Loader`, not new core code. Registered via
   `@register` or the `coviber.loaders` entry-point group.
 - **Local-first.** Records, graph, and vectors live on disk; the MCP transport is
-  stdio to a local process. No network is required for any core operation.
+  stdio to a local process. No network is required for any core operation. When
+  Qdrant is configured, it typically runs as a local Docker container — the data
+  never leaves your machine unless you point it at a remote URL yourself.
 - **Graceful degradation.** Core is standard-library only. `[search]`, `[scrape]`,
-  and `[mcp]` are opt-in extras; each degrades to a working fallback when absent
-  (keyword search instead of embeddings; a clear error instead of a crash).
+  `[qdrant]`, and `[mcp]` are opt-in extras; each degrades to a working fallback
+  when absent (keyword search instead of embeddings; JSON vector file instead of
+  Qdrant; a clear error instead of a crash).
 - **Inference-free voice.** Persona modelling is pure statistics — fast, private,
   and deterministic; no model call to draft in your style.
+
+## Vector backends
+The default `JSONVectorStore` writes all vectors to one `embeddings.json` next
+to `records.jsonl`. Zero-dep, human-inspectable, fine up to ~10⁵ records. When
+that ceiling matters, set `COVIBER_QDRANT_URL` or a `qdrant:` block in the
+config file to route persistence and search to a `QdrantVectorStore`. Same
+encoder, same cosine metric — Qdrant just handles storage and ANN server-side
+so query cost stops growing with the corpus. Model changes invalidate the
+index (a sidecar `qdrant.meta.json` tracks the persisted model tag).
 
 ## Extending
 ```python

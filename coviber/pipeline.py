@@ -27,6 +27,7 @@ class Settings:
     skip_senders: list = None
     skip_subjects: list = None
     weights: dict = None            # None -> urgency.DEFAULT_WEIGHTS
+    qdrant: dict = None             # None -> JSON vector backend; {"url": ...} → Qdrant
 
     @classmethod
     def from_dict(cls, d: dict) -> "Settings":
@@ -43,6 +44,7 @@ class Settings:
             skip_senders=d.get("skip_senders"),
             skip_subjects=d.get("skip_subjects"),
             weights=d.get("weights"),
+            qdrant=d.get("qdrant"),
         )
 
 
@@ -51,7 +53,7 @@ def ingest(settings: Settings) -> dict:
     loader = get_loader(settings.loader, settings.loader_config)
     records = list(loader.load())
 
-    store = Store(settings.data_dir)
+    store = Store(settings.data_dir, qdrant=settings.qdrant)
     n_new = store.upsert(records)
 
     graph = WorkGraph(known_projects=settings.known_projects, you=settings.you)
@@ -63,7 +65,7 @@ def ingest(settings: Settings) -> dict:
 
 
 def build_queue(settings: Settings) -> list[dict]:
-    store = Store(settings.data_dir)
+    store = Store(settings.data_dir, qdrant=settings.qdrant)
     cfg = UrgencyConfig(you=settings.you, priority_senders=set(settings.priority_senders),
                         collaborators=set(settings.collaborators),
                         action_words=set(settings.action_words) if settings.action_words else None,

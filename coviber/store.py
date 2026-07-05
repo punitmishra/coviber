@@ -3,9 +3,10 @@
 Zero-dependency by default: records are stored as deduped JSONL and search falls
 back to keyword scoring. If `sentence-transformers` is installed (the [search]
 extra), search upgrades to local embeddings + cosine — same model the whitepaper
-uses (all-MiniLM-L6-v2, 384-dim). Vectors persist in embeddings.json (atomic
-write, like records.jsonl) so only new records are encoded per query; a model
-change invalidates the cache. Everything stays on disk, no cloud egress.
+uses (all-MiniLM-L6-v2, 384-dim). Vectors persist locally via a `VectorStore`
+backend (see coviber.vector_stores): `JSONVectorStore` by default (one file next
+to records.jsonl, zero deps); `QdrantVectorStore` when a URL is configured (the
+`[qdrant]` extra, server-side ANN search — pick this past ~10^5 records).
 Writers serialize on an advisory file lock (`.lock`); reads stay lock-free.
 """
 from __future__ import annotations
@@ -19,6 +20,7 @@ from pathlib import Path
 from typing import Iterable
 
 from .record import Record
+from .vector_stores import VectorStore, resolve as resolve_vector_store
 
 EMBED_MODEL = "all-MiniLM-L6-v2"
 
@@ -67,12 +69,25 @@ def _get_embedder():
 
 
 class Store:
-    def __init__(self, data_dir: str | Path = "./coviber_data"):
+    def __init__(self, data_dir: str | Path = "./coviber_data", *,
+                 vectors: VectorStore | None = None, qdrant: dict | None = None):
+        """Store backed by JSONL records + a pluggable vector index.
+
+        `vectors`: pre-built VectorStore instance (mostly for tests). If None,
+        `resolve_vector_store` decides based on the `qdrant` config dict and
+        the `COVIBER_QDRANT_URL` env var — falling back to `JSONVectorStore`
+        when neither is set, preserving pre-v0.2 behavior.
+        """
         self.dir = Path(data_dir)
         self.dir.mkdir(parents=True, exist_ok=True)
         self.records_path = self.dir / "records.jsonl"
+        # Legacy attribute — some external callers may still read it; keep it
+        # pointing at the JSON backend's file even when Qdrant is active.
         self.embeddings_path = self.dir / "embeddings.json"
-        self.last_search_backend = None  # set by search(): "embeddings (<model>)" | "keyword"
+        self.last_search_backend = None  # set by search(): "embeddings (<model>) via <backend>" | "keyword"
+        self._vectors = vectors if vectors is not None else resolve_vector_store(
+            self.dir, model_tag=EMBED_MODEL, qdrant=qdrant,
+        )
 
     # --- record persistence (dedup by id, keep last) ---
     def upsert(self, records: Iterable[Record]) -> int:
@@ -138,52 +153,37 @@ class Store:
         if not records:
             return []
         try:
-            ranked = self._embedding_search(query, records)
-            self.last_search_backend = f"embeddings ({EMBED_MODEL})"
+            ranked = self._embedding_search(query, records, limit)
+            self.last_search_backend = f"embeddings ({EMBED_MODEL}) via {type(self._vectors).__name__}"
         except Exception:
             ranked = self._keyword_search(query, records)
             self.last_search_backend = "keyword"
         return ranked[:limit]
 
-    def _embedding_search(self, query: str, records: list[Record]) -> list[tuple[float, Record]]:
+    def _embedding_search(self, query: str, records: list[Record], limit: int
+                          ) -> list[tuple[float, Record]]:
         emb = _get_embedder()
-        vectors = self._load_vectors()
-        live = {r.id for r in records}
-        stale = [i for i in vectors if i not in live]
-        missing = [r for r in records if r.id not in vectors]
-        if missing:  # encode only the delta — the warm path never re-encodes
-            rows = emb.encode([f"{r.subject} {r.text}" for r in missing], normalize_embeddings=True)
-            for r, v in zip(missing, rows):
-                vectors[r.id] = [float(x) for x in v]
-        for i in stale:
-            del vectors[i]
-        if missing or stale:
-            self._save_vectors(vectors)
+        # Model-tag reconciliation happens at construction; here we only
+        # handle the delta between the record store and the vector index.
+        live_ids = {r.id for r in records}
+        known = self._vectors.known_ids()
+        stale = known - live_ids
+        missing = [r for r in records if r.id not in known]
+        if missing:
+            rows = emb.encode(
+                [f"{r.subject} {r.text}" for r in missing], normalize_embeddings=True,
+            )
+            self._vectors.upsert(
+                [(r.id, [float(x) for x in v]) for r, v in zip(missing, rows)],
+            )
+        if stale:
+            self._vectors.delete(stale)
         q = [float(x) for x in emb.encode([query], normalize_embeddings=True)[0]]
-        try:
-            import numpy as np
-            scores = (np.asarray([vectors[r.id] for r in records]) @ np.asarray(q)).tolist()
-        except ImportError:
-            scores = [sum(a * b for a, b in zip(vectors[r.id], q)) for r in records]
-        return sorted(zip(scores, records), key=lambda x: -x[0])
-
-    def _load_vectors(self) -> dict:
-        if not self.embeddings_path.exists():
-            return {}
-        try:
-            data = json.loads(self.embeddings_path.read_text(encoding="utf-8"))
-            if data.get("model") != EMBED_MODEL:
-                return {}  # different model → every cached vector is invalid
-            vecs = data.get("vectors")
-            return {k: v for k, v in vecs.items() if isinstance(v, list)} if isinstance(vecs, dict) else {}
-        except (json.JSONDecodeError, OSError, UnicodeDecodeError, AttributeError):
-            print(f"coviber: rebuilding corrupt embedding cache {self.embeddings_path}", file=sys.stderr)
-            return {}
-
-    def _save_vectors(self, vectors: dict):
-        tmp = self.embeddings_path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps({"model": EMBED_MODEL, "vectors": vectors}), encoding="utf-8")
-        os.replace(tmp, self.embeddings_path)
+        # Over-fetch so the store can enforce its own truncation to `limit`
+        # after mapping ids back to Records.
+        hits = self._vectors.search(q, live_ids, limit=max(limit * 2, 16))
+        id_to_rec = {r.id: r for r in records}
+        return [(score, id_to_rec[rid]) for score, rid in hits if rid in id_to_rec]
 
     def _keyword_search(self, query: str, records) -> list[tuple[float, Record]]:
         terms = [t for t in query.lower().split() if t]
