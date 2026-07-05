@@ -152,7 +152,7 @@ imap = "my_pkg.imap:ImapLoader"
 |-----------|--------------|
 | **Loader** | Source → canonical `Record` stream. The swappable seam. |
 | **WorkGraph** | Incremental entity extraction (people/projects/channels/tickets) with bidirectional links — O(1) per record. |
-| **Urgency** | `U(r) ∈ [0,15]` from @mentions, priority senders, action words, questions, unread, no-reply, collaborators, and age; plus a skip filter for bots/newsletters/FYI. |
+| **Urgency** | `U(r) ∈ [0,14]` from @mentions, priority senders, action words, questions, unread, no-reply, collaborators, and age; plus a skip filter for bots/newsletters/FYI. |
 | **Store** | Content-hash dedup (re-ingest = update, not duplicate) + local embeddings/cosine search. |
 
 ## Benchmarks (reproducible on the synthetic corpus)
