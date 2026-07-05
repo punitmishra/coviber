@@ -6,8 +6,9 @@ graph, and voice modelling — all served from your local disk. No cloud egress,
 no telemetry.
 
 Run:
-    coviber serve                       # stdio (Claude Desktop / Code)
-    coviber serve --data-dir ~/covibe   # point at your store
+    coviber serve                                 # stdio (Claude Desktop / Code)
+    coviber serve --data-dir ~/covibe             # point at your store
+    coviber serve --config ~/.coviber/config.yaml # same settings file as the CLI
 
 Requires the [mcp] extra:  pip install "coviber[mcp]"
 """
@@ -17,23 +18,32 @@ import os
 
 from mcp.server.fastmcp import FastMCP
 
+from .config import read_config
 from .persona import learn
 from .pipeline import Settings, build_queue, ingest
 from .store import Store
 
-DATA_DIR = os.environ.get("COVIBER_DATA_DIR", "./coviber_data")
 mcp = FastMCP("coviber")
 
 
 def _settings() -> Settings:
-    return Settings(data_dir=DATA_DIR, you=os.environ.get("COVIBER_YOU", "you"))
+    """Config parity with the CLI: COVIBER_CONFIG (same YAML/JSON file `coviber triage
+    --config` takes) seeds Settings; COVIBER_DATA_DIR / COVIBER_YOU override when set.
+    Re-read per call so every tool sees current config without a server restart."""
+    path = os.environ.get("COVIBER_CONFIG")
+    s = Settings.from_dict(read_config(path)) if path else Settings()
+    if os.environ.get("COVIBER_DATA_DIR"):
+        s.data_dir = os.environ["COVIBER_DATA_DIR"]
+    if os.environ.get("COVIBER_YOU"):
+        s.you = os.environ["COVIBER_YOU"]
+    return s
 
 
 @mcp.tool()
 def recall(query: str, limit: int = 6) -> str:
     """Semantic search over your local context — 'what do I know about X?'.
     Returns the most relevant records (sender, source, subject) from local memory."""
-    hits = Store(DATA_DIR).search(query, limit=limit)
+    hits = Store(_settings().data_dir).search(query, limit=limit)
     if not hits:
         return "No matching context. Run `coviber ingest` to load data first."
     lines = [f"# Recall: {query}"]
@@ -62,7 +72,7 @@ def who_is(name: str) -> str:
     """What the work graph knows about a person: platforms, projects, channels, activity."""
     import json
     from pathlib import Path
-    gp = Path(DATA_DIR) / "workgraph.json"
+    gp = Path(_settings().data_dir) / "workgraph.json"
     if not gp.exists():
         return "No graph yet — run `coviber ingest`."
     node = json.loads(gp.read_text()).get("people", {}).get(name)
@@ -74,7 +84,7 @@ def project_status(name: str) -> str:
     """What the work graph knows about a project: people, channels, related tickets."""
     import json
     from pathlib import Path
-    gp = Path(DATA_DIR) / "workgraph.json"
+    gp = Path(_settings().data_dir) / "workgraph.json"
     if not gp.exists():
         return "No graph yet — run `coviber ingest`."
     node = json.loads(gp.read_text()).get("projects", {}).get(name)
@@ -86,7 +96,7 @@ def graph_summary() -> str:
     """High-level shape of your context: counts + top people + projects."""
     import json
     from pathlib import Path
-    gp = Path(DATA_DIR) / "workgraph.json"
+    gp = Path(_settings().data_dir) / "workgraph.json"
     if not gp.exists():
         return "No graph yet — run `coviber ingest`."
     g = json.loads(gp.read_text())
@@ -102,9 +112,10 @@ def graph_summary() -> str:
 def voice_profile() -> str:
     """Your inference-free writing-voice profile + a ready system prompt for drafting
     in your style, learned locally from records you authored (from_name == 'you')."""
-    you = os.environ.get("COVIBER_YOU", "you").lower()
+    s = _settings()
+    you = s.you.lower()
     # body only — a leading subject line would defeat the persona engine's opener detection
-    mine = [r.text for r in Store(DATA_DIR).all()
+    mine = [r.text for r in Store(s.data_dir).all()
             if (r.from_name or "").lower() == you and r.text]
     if not mine:
         return ("No self-authored messages found in local memory. Set from_name to your "
@@ -119,9 +130,9 @@ def refresh(loader: str, path: str = "") -> str:
     """Ingest fresh context via a named loader — loader='jsonl' with a path, or any
     registered loader. Pass loader='demo' explicitly to load the synthetic demo corpus
     (it mixes fictional records into your real store; use a scratch data dir)."""
-    cfg = {"path": path} if path else {}
-    stats = ingest(Settings(loader=loader, loader_config=cfg, data_dir=DATA_DIR,
-                            you=os.environ.get("COVIBER_YOU", "you")))
+    s = _settings()  # inherit known_projects, skip rules, etc. from the shared config
+    s.loader, s.loader_config = loader, ({"path": path} if path else {})
+    stats = ingest(s)
     g = stats["graph"]
     return (f"Ingested via {loader}: {stats['new']} new / {stats['total']} total. "
             f"Graph: {g['people']} people, {g['projects']} projects, {g['tickets']} tickets.")
