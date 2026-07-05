@@ -42,7 +42,7 @@
 - `[appendix]` TODO-qdrant: Qdrant vector database, https://qdrant.tech/documentation/
 - `[appendix]` TODO-hnsw: Malkov and Yashunin, Hierarchical Navigable Small World graphs, TPAMI 2020 (ANN index used by Qdrant backend)
 - `[appendix]` TODO-jsonl: JSON Lines specification, https://jsonlines.org/
-- `[appendix]` TODO-sha256: NIST FIPS 180-4, Secure Hash Standard (SHA-256 used for Record.id)
+- `[appendix]` TODO-md5: Rivest, RFC 1321 — The MD5 Message-Digest Algorithm (Record.id uses MD5 with usedforsecurity=False as a non-cryptographic dedup key; the paper body states this correctly)
 - `[appendix]` TODO-uuid5: RFC 4122 Section 4.3, name-based UUID (used for vector-store point ids in the brain layer)
 - `[appendix]` TODO-fcntl-posix: POSIX.1 fcntl advisory locking (used by Store's writer lock)
 - `[appendix]` TODO-arxiv-style: arXiv style guide / arxiv.sty template
