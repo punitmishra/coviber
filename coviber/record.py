@@ -22,7 +22,7 @@ def _normalize_ts(s: str) -> str:
     Non-string inputs (int/float epoch, bool, None) are coerced via str() —
     the JSONL loader and hand-edited records.jsonl can both produce these,
     and a raw AttributeError from `.strip()` would brick the whole store on
-    the next read (audit finding L3/#5 + L1/#1).
+    the next read (audit finding L1/#1 + L3/#5).
     """
     s = str(s or "").strip()
     if not s:
