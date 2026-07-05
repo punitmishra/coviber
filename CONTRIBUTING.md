@@ -13,8 +13,9 @@ context. That's the highest-value contribution.
 
 ## Dev setup
 ```bash
-pip install -e ".[all]"
-python tests/test_pipeline.py     # or: python -m pytest
+pip install -e ".[all,dev]"
+python -m pytest                  # or: python tests/test_pipeline.py
+ruff check .                      # lint (config in pyproject.toml)
 python bench/run.py               # reproduce the benchmark
 ```
 

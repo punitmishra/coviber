@@ -6,3 +6,8 @@ dist/
 coviber_data/
 .venv/
 .DS_Store
+.pytest_cache/
+.ruff_cache/
+.claude/settings.local.json
+# local-only pre-push scan; holds a private token list — never commit it
+.gate-scan.sh

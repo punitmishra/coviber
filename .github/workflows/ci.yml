@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff
+      - run: ruff check .
+
+  test:
+    name: test (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install -e ".[scrape]" pytest
+      - run: python -m pytest tests/ -v
+      - name: demo smoke test
+        run: coviber demo
+      - name: benchmark smoke test
+        run: python bench/run.py --scale 200
+
+  core:
+    name: core (zero dependencies)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e . pytest
+      - run: python -m pytest tests/ -v
+      - name: demo works on stdlib alone
+        run: coviber demo
+
+  mcp:
+    name: mcp server registers 7 tools
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[mcp]"
+      - name: tool registration smoke test
+        run: |
+          python -c "
+          import asyncio
+          from coviber.mcp_server import mcp
+          tools = asyncio.run(mcp.list_tools())
+          names = sorted(t.name for t in tools)
+          assert len(tools) == 7, names
+          print('registered:', names)
+          "
