@@ -1,0 +1,49 @@
+{
+  "git_sha": "b5761d2",
+  "hardware": {
+    "platform": "macOS-26.5.1-arm64-arm-64bit",
+    "machine": "arm64",
+    "processor": "arm",
+    "python": "3.10.18"
+  },
+  "search_mode": "off",
+  "results": [
+    {
+      "scale": 1000,
+      "ingest_ms": 31.7,
+      "ingest_throughput_rec_per_s": 31546,
+      "graph_ms": 11.69,
+      "graph_throughput_rec_per_s": 85515,
+      "triage_ms": 10.49,
+      "triage_throughput_rec_per_s": 95361,
+      "search_cold_ms": 7.47,
+      "search_warm_ms": 7.19,
+      "search_backend": "keyword"
+    },
+    {
+      "scale": 10000,
+      "ingest_ms": 194.44,
+      "ingest_throughput_rec_per_s": 51431,
+      "graph_ms": 123.8,
+      "graph_throughput_rec_per_s": 80776,
+      "triage_ms": 102.79,
+      "triage_throughput_rec_per_s": 97285,
+      "search_cold_ms": 72.55,
+      "search_warm_ms": 70.96,
+      "search_backend": "keyword"
+    },
+    {
+      "scale": 100000,
+      "ingest_ms": 1847.63,
+      "ingest_throughput_rec_per_s": 54124,
+      "graph_ms": 1327.44,
+      "graph_throughput_rec_per_s": 75333,
+      "triage_ms": 1075.76,
+      "triage_throughput_rec_per_s": 92957,
+      "search_cold_ms": 738.89,
+      "search_warm_ms": 760.29,
+      "search_backend": "keyword"
+    }
+  ],
+  "schema_version": "1.0"
+}
