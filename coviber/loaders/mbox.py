@@ -5,16 +5,62 @@ mapping used by both the mbox and imap loaders.
 """
 from __future__ import annotations
 
+import html
 import mailbox
 from email.header import decode_header, make_header
 from email.message import Message
 from email.utils import parseaddr, parsedate_to_datetime
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Iterable, Optional
 
 from ..record import Record
 from . import register
 from .base import Loader
+
+
+class _HTMLTextExtractor(HTMLParser):
+    """Minimal stdlib HTML→text stripper for the html-only email fallback.
+
+    Drops <script>/<style> contents entirely; turns block-ending tags into
+    newlines so paragraphs don't run together. Not a general-purpose renderer —
+    just enough that graph/urgency/search see readable text.
+    """
+    _BLOCK = {"p", "br", "div", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6"}
+    _SKIP = {"script", "style"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self._parts: list[str] = []
+        self._skip_depth = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self._SKIP:
+            self._skip_depth += 1
+        elif tag in self._BLOCK:
+            self._parts.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in self._SKIP and self._skip_depth:
+            self._skip_depth -= 1
+        elif tag in self._BLOCK:
+            self._parts.append("\n")
+
+    def handle_data(self, data):
+        if not self._skip_depth:
+            self._parts.append(data)
+
+    def get_text(self) -> str:
+        return html.unescape("".join(self._parts)).strip()
+
+
+def _html_to_text(raw: str) -> str:
+    p = _HTMLTextExtractor()
+    try:
+        p.feed(raw); p.close()
+    except Exception:
+        return raw  # malformed HTML — better to keep the raw bytes than lose the record
+    return p.get_text()
 
 
 def _decode(value: Optional[str]) -> str:
@@ -40,15 +86,24 @@ def _iso_ts(raw: Optional[str]) -> str:
         return raw
 
 
+def _decode_part(part: Message) -> str:
+    payload = part.get_payload(decode=True)
+    if payload is None:
+        payload = (part.get_payload() or "").encode("utf-8", "replace")
+    return payload.decode(part.get_content_charset() or "utf-8", errors="replace")
+
+
 def _body(msg: Message) -> str:
+    html_fallback = None  # first non-attachment text/html, used only if no text/plain wins
     for part in msg.walk():  # walk() on a single-part message yields just itself
-        if part.get_content_type() != "text/plain" or "attachment" in (part.get("Content-Disposition") or ""):
+        if "attachment" in (part.get("Content-Disposition") or ""):
             continue
-        payload = part.get_payload(decode=True)
-        if payload is None:
-            payload = (part.get_payload() or "").encode("utf-8", "replace")
-        return payload.decode(part.get_content_charset() or "utf-8", errors="replace")
-    return ""
+        ctype = part.get_content_type()
+        if ctype == "text/plain":
+            return _decode_part(part)
+        if ctype == "text/html" and html_fallback is None:
+            html_fallback = _decode_part(part)
+    return _html_to_text(html_fallback) if html_fallback else ""
 
 
 def message_to_record(msg: Message, source: str = "email", unread: Optional[bool] = None,
